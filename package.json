@@ -1,7 +1,7 @@
 {
-    "name": "my-vscode-extension",
-    "displayName": "My VS Code Extension",
-    "description": "A sample VS Code extension",
+    "name": "bot-boss",
+    "displayName": "Bot Boss - VS Code Instance Manager",
+    "description": "Manage and monitor all your open VS Code instances",
     "version": "0.0.1",
     "engines": {
         "vscode": "^1.74.0"
@@ -9,34 +9,42 @@
     "categories": [
         "Other"
     ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/sidanmor/bot-boss.git"
+    },
     "activationEvents": [],
     "main": "./out/extension.js",
     "contributes": {
         "commands": [
             {
-                "command": "my-vscode-extension.helloWorld",
-                "title": "Hello World"
+                "command": "bot-boss.refreshInstances",
+                "title": "Refresh VS Code Instances",
+                "icon": "$(refresh)"
             },
             {
-                "command": "my-vscode-extension.refresh",
-                "title": "Refresh",
-                "icon": "$(refresh)"
+                "command": "bot-boss.focusInstance",
+                "title": "Focus Instance"
+            },
+            {
+                "command": "bot-boss.openWorkspaceInfo",
+                "title": "Show Workspace Info"
             }
         ],
         "viewsContainers": {
             "activitybar": [
                 {
-                    "id": "my-extension-view",
-                    "title": "My Extension",
-                    "icon": "$(symbol-class)"
+                    "id": "bot-boss-view",
+                    "title": "Bot Boss",
+                    "icon": "$(workspace-trusted)"
                 }
             ]
         },
         "views": {
-            "my-extension-view": [
+            "bot-boss-view": [
                 {
-                    "id": "myExtensionExplorer",
-                    "name": "Explorer",
+                    "id": "vscodeInstancesExplorer",
+                    "name": "VS Code Instances",
                     "when": "true"
                 }
             ]
@@ -44,9 +52,21 @@
         "menus": {
             "view/title": [
                 {
-                    "command": "my-vscode-extension.refresh",
-                    "when": "view == myExtensionExplorer",
+                    "command": "bot-boss.refreshInstances",
+                    "when": "view == vscodeInstancesExplorer",
                     "group": "navigation"
+                }
+            ],
+            "view/item/context": [
+                {
+                    "command": "bot-boss.focusInstance",
+                    "when": "view == vscodeInstancesExplorer && viewItem == vscodeInstance",
+                    "group": "inline"
+                },
+                {
+                    "command": "bot-boss.openWorkspaceInfo",
+                    "when": "view == vscodeInstancesExplorer && viewItem == vscodeInstance",
+                    "group": "context"
                 }
             ]
         }
@@ -61,5 +81,8 @@
         "@types/node": "16.x",
         "@vscode/test-electron": "^2.3.2",
         "typescript": "^4.9.4"
+    },
+    "dependencies": {
+        "ps-list": "^8.1.1"
     }
 }
