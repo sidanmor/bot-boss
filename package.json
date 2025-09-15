@@ -16,8 +16,40 @@
             {
                 "command": "my-vscode-extension.helloWorld",
                 "title": "Hello World"
+            },
+            {
+                "command": "my-vscode-extension.refresh",
+                "title": "Refresh",
+                "icon": "$(refresh)"
             }
-        ]
+        ],
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "my-extension-view",
+                    "title": "My Extension",
+                    "icon": "$(symbol-class)"
+                }
+            ]
+        },
+        "views": {
+            "my-extension-view": [
+                {
+                    "id": "myExtensionExplorer",
+                    "name": "Explorer",
+                    "when": "true"
+                }
+            ]
+        },
+        "menus": {
+            "view/title": [
+                {
+                    "command": "my-vscode-extension.refresh",
+                    "when": "view == myExtensionExplorer",
+                    "group": "navigation"
+                }
+            ]
+        }
     },
     "scripts": {
         "vscode:prepublish": "npm run compile",
