@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { VSCodeInstanceService, VSCodeInstance } from "./vscodeInstanceService";
 import { SharedInstanceManager } from "./sharedInstanceManager";
+import { GitHubStatusService } from "./githubStatusService";
 
 // Tree data provider for VS Code instances
 class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTreeItem> {
@@ -743,7 +744,56 @@ export function activate(context: vscode.ExtensionContext) {
         const doc = await vscode.workspace.openTextDocument({content: lines.join('\n'), language: 'markdown'});
         await vscode.window.showTextDocument(doc, { preview: true });
     });
+
+    // Command: Show GitHub service status
+    const gitHubStatusCommand = vscode.commands.registerCommand('bot-boss.showGitHubStatus', async () => {
+        try {
+            const statusService = GitHubStatusService.getInstance();
+            const report = await statusService.getStatusReport();
+            
+            const doc = await vscode.workspace.openTextDocument({
+                content: report,
+                language: 'markdown'
+            });
+            await vscode.window.showTextDocument(doc, { preview: true });
+        } catch (error) {
+            vscode.window.showErrorMessage(`Failed to fetch GitHub status: ${error}`);
+        }
+    });
+
+    // Command: Show quick GitHub status in status bar
+    const quickGitHubStatusCommand = vscode.commands.registerCommand('bot-boss.quickGitHubStatus', async () => {
+        try {
+            const statusService = GitHubStatusService.getInstance();
+            const overall = await statusService.getOverallStatus();
+            const activeIncidents = await statusService.getActiveIncidents();
+            
+            let message = `GitHub Status: ${overall.icon} ${overall.description}`;
+            if (activeIncidents.length > 0) {
+                message += ` (${activeIncidents.length} active incident${activeIncidents.length === 1 ? '' : 's'})`;
+            }
+            
+            vscode.window.showInformationMessage(message, 'View Details').then(selection => {
+                if (selection === 'View Details') {
+                    vscode.commands.executeCommand('bot-boss.showGitHubStatus');
+                }
+            });
+        } catch (error) {
+            vscode.window.showErrorMessage(`Failed to fetch GitHub status: ${error}`);
+        }
+    });
+
+    // Command: Clear GitHub status cache
+    const clearGitHubCacheCommand = vscode.commands.registerCommand('bot-boss.clearGitHubCache', async () => {
+        const statusService = GitHubStatusService.getInstance();
+        statusService.clearCache();
+        vscode.window.showInformationMessage('GitHub status cache cleared. Next status request will fetch fresh data.');
+    });
+
     context.subscriptions.push(copilotStatusCommand);
+    context.subscriptions.push(gitHubStatusCommand);
+    context.subscriptions.push(quickGitHubStatusCommand);
+    context.subscriptions.push(clearGitHubCacheCommand);
     context.subscriptions.push({
         dispose: () => clearInterval(autoRefreshInterval)
     });

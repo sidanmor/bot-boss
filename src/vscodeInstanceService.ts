@@ -5,6 +5,7 @@ import * as os from 'os';
 import { spawn, exec } from 'child_process';
 import { promisify } from 'util';
 import { SharedInstanceManager } from './sharedInstanceManager';
+import { GitHubStatusService } from './githubStatusService';
 
 const execAsync = promisify(exec);
 
