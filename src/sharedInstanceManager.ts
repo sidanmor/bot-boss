@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as vscode from 'vscode';
-import { VSCodeInstance, GitInfo } from './vscodeInstanceService';
+import { VSCodeInstance, GitInfo, CopilotInfo } from './vscodeInstanceService';
 
 export interface SharedInstanceData {
     pid: number;
@@ -12,6 +12,7 @@ export interface SharedInstanceData {
     workspacePath?: string;
     windowTitle?: string;
     gitInfo?: GitInfo;
+    copilotInfo?: CopilotInfo;
     lastUpdated: number;
     startTime: number;
     memory: number;
@@ -123,6 +124,9 @@ export class SharedInstanceManager {
             instanceData.name = `VS Code - ${vscode.workspace.name}`;
         }
 
+        // Get GitHub Copilot info
+        instanceData.copilotInfo = await this.getCopilotInfo();
+
         // Get window title from VS Code API if available
         try {
             // Try to get more detailed window information
@@ -173,6 +177,86 @@ export class SharedInstanceManager {
         }
         
         return gitInfo;
+    }
+
+    /**
+     * Get GitHub Copilot information (simplified version for shared manager)
+     */
+    private async getCopilotInfo(): Promise<CopilotInfo> {
+        const copilotInfo: CopilotInfo = {
+            isInstalled: false,
+            isActive: false,
+            status: 'Unknown'
+        };
+
+        try {
+            // GitHub Copilot extension ID
+            const copilotExtensionId = 'github.copilot';
+            const copilotExtension = vscode.extensions.getExtension(copilotExtensionId);
+
+            if (!copilotExtension) {
+                copilotInfo.status = 'Disabled';
+                return copilotInfo;
+            }
+
+            copilotInfo.isInstalled = true;
+            copilotInfo.version = copilotExtension.packageJSON?.version;
+
+            if (!copilotExtension.isActive) {
+                copilotInfo.status = 'Disabled';
+                return copilotInfo;
+            }
+
+            copilotInfo.isActive = true;
+
+            // Simple status detection - assume running if active
+            copilotInfo.status = 'Running';
+            
+            // Try basic API check
+            try {
+                const copilotApi = copilotExtension.exports;
+                if (copilotApi && typeof copilotApi.getStatus === 'function') {
+                    const status = await copilotApi.getStatus();
+                    if (status) {
+                        copilotInfo.status = this.mapCopilotStatus(status);
+                    }
+                }
+            } catch (apiError) {
+                // Keep default 'Running' status
+            }
+
+            copilotInfo.lastActivity = new Date().toISOString();
+
+        } catch (error) {
+            console.error('Error getting Copilot info in SharedInstanceManager:', error);
+            copilotInfo.error = error instanceof Error ? error.message : String(error);
+            copilotInfo.status = 'Failed';
+        }
+
+        return copilotInfo;
+    }
+
+    /**
+     * Map Copilot status values (simplified version)
+     */
+    private mapCopilotStatus(status: any): CopilotInfo['status'] {
+        if (typeof status === 'string') {
+            const statusLower = status.toLowerCase();
+            
+            if (statusLower.includes('running') || statusLower.includes('active') || statusLower.includes('ready')) {
+                return 'Running';
+            } else if (statusLower.includes('waiting') || statusLower.includes('pending') || statusLower.includes('approval')) {
+                return 'Waiting for Approval';
+            } else if (statusLower.includes('failed') || statusLower.includes('error')) {
+                return 'Failed';
+            } else if (statusLower.includes('done') || statusLower.includes('completed')) {
+                return 'Done';
+            } else if (statusLower.includes('disabled')) {
+                return 'Disabled';
+            }
+        }
+
+        return 'Running'; // Default for active extension
     }
 
     /**
@@ -258,16 +342,46 @@ export class SharedInstanceManager {
     private convertToVSCodeInstance(data: SharedInstanceData): VSCodeInstance {
         const uptime = Math.floor((Date.now() - data.startTime) / 1000);
         
+        let displayName = data.name;
+        
+        // If this is the current instance (same PID), enhance the display name but keep base token
+        if (data.pid === process.pid) {
+            console.log(`[BotBoss] Enhancing display name for current instance (PID: ${data.pid})`);
+
+            let suffix: string | undefined;
+            if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+                const workspaceFolder = vscode.workspace.workspaceFolders[0];
+                const folderName = path.basename(workspaceFolder.uri.fsPath);
+                suffix = folderName;
+            } else if (vscode.workspace.name) {
+                suffix = vscode.workspace.name;
+            }
+
+            if (suffix) {
+                // Preserve original 'VS Code - Current Instance' string from shared file and append workspace
+                if (/VS Code - Current Instance/i.test(displayName)) {
+                    displayName = `${displayName} (${suffix})`;
+                } else {
+                    // Fallback if name was already transformed elsewhere
+                    displayName = `VS Code - Current Instance (${suffix})`;
+                }
+                console.log(`[BotBoss] Display name with workspace: ${displayName}`);
+            } else {
+                console.log(`[BotBoss] No workspace info available, keeping original name: ${displayName}`);
+            }
+        }
+        
         return {
             pid: data.pid,
-            name: data.name,
+            name: displayName,
             workspacePath: data.workspacePath,
             windowTitle: data.windowTitle,
             arguments: [], // Not available in shared data
             cpu: 0, // Not tracked in shared data
             memory: data.memory,
             uptime: this.calculateUptimeFromSeconds(uptime),
-            gitInfo: data.gitInfo
+            gitInfo: data.gitInfo,
+            copilotInfo: data.copilotInfo
         };
     }
 

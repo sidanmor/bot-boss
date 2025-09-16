@@ -18,6 +18,15 @@ export interface GitInfo {
     behind?: number;
 }
 
+export interface CopilotInfo {
+    isInstalled: boolean;
+    isActive: boolean;
+    status: 'Running' | 'Waiting for Approval' | 'Failed' | 'Done' | 'Disabled' | 'Unknown';
+    lastActivity?: string;
+    version?: string;
+    error?: string;
+}
+
 export interface VSCodeInstance {
     pid: number;
     name: string;
@@ -28,6 +37,7 @@ export interface VSCodeInstance {
     memory: number;
     uptime?: string;
     gitInfo?: GitInfo;
+    copilotInfo?: CopilotInfo;
 }
 
 export class VSCodeInstanceService {
@@ -167,17 +177,21 @@ export class VSCodeInstanceService {
                 uptime: this.calculateUptimeFromSeconds(process.uptime())
             };
 
-            // Get workspace information
+            // Get workspace information (augment name rather than replace base token)
             if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
                 const workspaceFolder = vscode.workspace.workspaceFolders[0];
                 currentInstance.workspacePath = workspaceFolder.uri.fsPath;
-                currentInstance.name = `VS Code - ${path.basename(workspaceFolder.uri.fsPath)}`;
-                
+                const folderName = path.basename(workspaceFolder.uri.fsPath);
+                currentInstance.name = `VS Code - Current Instance (${folderName})`;
+
                 // Get git info for current workspace
                 currentInstance.gitInfo = await this.getGitInfo(workspaceFolder.uri.fsPath);
             } else if (vscode.workspace.name) {
-                currentInstance.name = `VS Code - ${vscode.workspace.name}`;
+                currentInstance.name = `VS Code - Current Instance (${vscode.workspace.name})`;
             }
+
+            // Get GitHub Copilot info
+            currentInstance.copilotInfo = await this.getCopilotInfo();
 
             return currentInstance;
         } catch (error) {
@@ -1000,5 +1014,130 @@ export class VSCodeInstanceService {
         }
 
         return gitInfo;
+    }
+
+    /**
+     * Get GitHub Copilot information for the current VS Code instance
+     */
+    async getCopilotInfo(): Promise<CopilotInfo> {
+        const copilotInfo: CopilotInfo = {
+            isInstalled: false,
+            isActive: false,
+            status: 'Unknown'
+        };
+
+        try {
+            // GitHub Copilot extension ID
+            const copilotExtensionId = 'github.copilot';
+            const copilotExtension = vscode.extensions.getExtension(copilotExtensionId);
+
+            if (!copilotExtension) {
+                copilotInfo.status = 'Disabled';
+                return copilotInfo;
+            }
+
+            copilotInfo.isInstalled = true;
+            copilotInfo.version = copilotExtension.packageJSON?.version;
+
+            if (!copilotExtension.isActive) {
+                copilotInfo.status = 'Disabled';
+                return copilotInfo;
+            }
+
+            copilotInfo.isActive = true;
+
+            // Try to get status from the extension's exports/API
+            try {
+                const copilotApi = copilotExtension.exports;
+                
+                if (copilotApi) {
+                    // Check for common status indicators
+                    if (typeof copilotApi.getStatus === 'function') {
+                        const status = await copilotApi.getStatus();
+                        copilotInfo.status = this.mapCopilotStatus(status);
+                    } else if (typeof copilotApi.status === 'string') {
+                        copilotInfo.status = this.mapCopilotStatus(copilotApi.status);
+                    } else if (copilotApi.state) {
+                        copilotInfo.status = this.mapCopilotStatus(copilotApi.state);
+                    } else {
+                        // Default to Running if extension is active but no specific status
+                        copilotInfo.status = 'Running';
+                    }
+
+                    // Try to get last activity
+                    if (copilotApi.lastActivity) {
+                        copilotInfo.lastActivity = copilotApi.lastActivity;
+                    }
+                } else {
+                    // Extension is active but no API exports - assume running
+                    copilotInfo.status = 'Running';
+                }
+            } catch (apiError) {
+                console.log('Could not access Copilot API:', apiError);
+                // Extension is active but API call failed - likely still running
+                copilotInfo.status = 'Running';
+            }
+
+            // Additional status checks using VS Code commands (fallback method)
+            try {
+                // Check if Copilot commands are available
+                const commands = await vscode.commands.getCommands(true);
+                const copilotCommands = commands.filter(cmd => cmd.startsWith('github.copilot'));
+                
+                if (copilotCommands.length > 0) {
+                    // Try to get status through commands
+                    if (commands.includes('github.copilot.status')) {
+                        try {
+                            const status = await vscode.commands.executeCommand('github.copilot.status');
+                            if (status) {
+                                copilotInfo.status = this.mapCopilotStatus(status);
+                            }
+                        } catch (cmdError) {
+                            console.log('Could not execute copilot status command:', cmdError);
+                        }
+                    }
+                    
+                    // Update last activity to current time if commands are available
+                    copilotInfo.lastActivity = new Date().toISOString();
+                }
+            } catch (commandError) {
+                console.log('Could not check Copilot commands:', commandError);
+            }
+
+        } catch (error) {
+            console.error('Error getting Copilot info:', error);
+            copilotInfo.error = error instanceof Error ? error.message : String(error);
+            copilotInfo.status = 'Failed';
+        }
+
+        return copilotInfo;
+    }
+
+    /**
+     * Map various Copilot status values to our standard status types
+     */
+    private mapCopilotStatus(status: any): CopilotInfo['status'] {
+        if (typeof status === 'string') {
+            const statusLower = status.toLowerCase();
+            
+            if (statusLower.includes('running') || statusLower.includes('active') || statusLower.includes('ready')) {
+                return 'Running';
+            } else if (statusLower.includes('waiting') || statusLower.includes('pending') || statusLower.includes('approval')) {
+                return 'Waiting for Approval';
+            } else if (statusLower.includes('failed') || statusLower.includes('error')) {
+                return 'Failed';
+            } else if (statusLower.includes('done') || statusLower.includes('completed') || statusLower.includes('success')) {
+                return 'Done';
+            } else if (statusLower.includes('disabled') || statusLower.includes('inactive')) {
+                return 'Disabled';
+            }
+        } else if (typeof status === 'object' && status !== null) {
+            // Handle object status
+            if (status.state || status.status) {
+                return this.mapCopilotStatus(status.state || status.status);
+            }
+        }
+
+        return 'Unknown';
     }
 }

@@ -130,6 +130,51 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
                 ));
             }
 
+            // GitHub Copilot information section
+            if (instance.copilotInfo) {
+                const copilot = instance.copilotInfo;
+                const statusIcon = this.getCopilotStatusIcon(copilot.status);
+                const statusColor = this.getCopilotStatusColor(copilot.status);
+                
+                let copilotLabel = `${statusIcon} Copilot: ${copilot.status}`;
+                if (!copilot.isInstalled) {
+                    copilotLabel = '❌ Copilot: Not Installed';
+                } else if (!copilot.isActive) {
+                    copilotLabel = '⏸️ Copilot: Inactive';
+                } else if (copilot.version) {
+                    copilotLabel += ` (v${copilot.version})`;
+                }
+
+                const copilotItem = new VSCodeInstanceTreeItem(
+                    copilotLabel,
+                    vscode.TreeItemCollapsibleState.None,
+                    'copilot-status'
+                );
+                
+                // Add description with last activity if available
+                if (copilot.lastActivity) {
+                    const lastActivity = new Date(copilot.lastActivity);
+                    copilotItem.description = `Last: ${lastActivity.toLocaleTimeString()}`;
+                }
+
+                details.push(copilotItem);
+
+                // Show error if there is one
+                if (copilot.error) {
+                    details.push(new VSCodeInstanceTreeItem(
+                        `⚠️ Error: ${copilot.error}`,
+                        vscode.TreeItemCollapsibleState.None,
+                        'copilot-error'
+                    ));
+                }
+            } else {
+                details.push(new VSCodeInstanceTreeItem(
+                    '❓ Copilot: Status Unknown',
+                    vscode.TreeItemCollapsibleState.None,
+                    'copilot-unknown'
+                ));
+            }
+
             details.push(new VSCodeInstanceTreeItem(
                 `🆔 PID: ${instance.pid}`,
                 vscode.TreeItemCollapsibleState.None,
@@ -198,6 +243,40 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
         // https://github.com/user/repo.git -> github.com/user/repo
         return url.replace('https://', '').replace('.git', '');
     }
+
+    private getCopilotStatusIcon(status: string): string {
+        switch (status) {
+            case 'Running':
+                return '🟢';
+            case 'Waiting for Approval':
+                return '🟡';
+            case 'Failed':
+                return '🔴';
+            case 'Done':
+                return '✅';
+            case 'Disabled':
+                return '⚫';
+            default:
+                return '❓';
+        }
+    }
+
+    private getCopilotStatusColor(status: string): string {
+        switch (status) {
+            case 'Running':
+                return 'green';
+            case 'Waiting for Approval':
+                return 'yellow';
+            case 'Failed':
+                return 'red';
+            case 'Done':
+                return 'blue';
+            case 'Disabled':
+                return 'gray';
+            default:
+                return 'gray';
+        }
+    }
 }
 
 class VSCodeInstanceTreeItem extends vscode.TreeItem {
@@ -245,7 +324,35 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
             }
         }
         
+        // Add Copilot status
+        if (this.instance.copilotInfo) {
+            const copilot = this.instance.copilotInfo;
+            if (copilot.isInstalled) {
+                const statusIcon = this.getCopilotStatusIcon(copilot.status);
+                desc += ` • ${statusIcon}${copilot.status}`;
+            } else {
+                desc += ` • ❌Copilot`;
+            }
+        }
+        
         return desc;
+    }
+
+    private getCopilotStatusIcon(status: string): string {
+        switch (status) {
+            case 'Running':
+                return '🟢';
+            case 'Waiting for Approval':
+                return '🟡';
+            case 'Failed':
+                return '🔴';
+            case 'Done':
+                return '✅';
+            case 'Disabled':
+                return '⚫';
+            default:
+                return '❓';
+        }
     }
 
     private createTooltip(): string {
@@ -282,6 +389,27 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
                     tooltip += `\n`;
                 }
             }
+
+            // Add Copilot information if available
+            if (this.instance.copilotInfo) {
+                tooltip += `\n--- GitHub Copilot ---\n`;
+                const copilot = this.instance.copilotInfo;
+                tooltip += `Installed: ${copilot.isInstalled ? 'Yes' : 'No'}\n`;
+                if (copilot.isInstalled) {
+                    tooltip += `Active: ${copilot.isActive ? 'Yes' : 'No'}\n`;
+                    tooltip += `Status: ${copilot.status}\n`;
+                    if (copilot.version) {
+                        tooltip += `Version: ${copilot.version}\n`;
+                    }
+                    if (copilot.lastActivity) {
+                        const lastActivity = new Date(copilot.lastActivity);
+                        tooltip += `Last Activity: ${lastActivity.toLocaleString()}\n`;
+                    }
+                    if (copilot.error) {
+                        tooltip += `Error: ${copilot.error}\n`;
+                    }
+                }
+            }
             
             tooltip += `\nLast seen: ${new Date().toLocaleTimeString()}`;
             return tooltip;
@@ -310,6 +438,12 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
                 return new vscode.ThemeIcon('globe');
             case 'no-git':
                 return new vscode.ThemeIcon('file');
+            case 'copilot-status':
+                return new vscode.ThemeIcon('github');
+            case 'copilot-error':
+                return new vscode.ThemeIcon('error');
+            case 'copilot-unknown':
+                return new vscode.ThemeIcon('question');
             case 'detail':
                 return new vscode.ThemeIcon('info');
             case 'message':
@@ -417,6 +551,30 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                     info += `\n`;
                 }
+            }
+
+            // GitHub Copilot information
+            if (instance.copilotInfo) {
+                info += `\n--- GitHub Copilot ---\n`;
+                const copilot = instance.copilotInfo;
+                info += `Installed: ${copilot.isInstalled ? 'Yes' : 'No'}\n`;
+                if (copilot.isInstalled) {
+                    info += `Active: ${copilot.isActive ? 'Yes' : 'No'}\n`;
+                    info += `Status: ${copilot.status}\n`;
+                    if (copilot.version) {
+                        info += `Version: ${copilot.version}\n`;
+                    }
+                    if (copilot.lastActivity) {
+                        const lastActivity = new Date(copilot.lastActivity);
+                        info += `Last Activity: ${lastActivity.toLocaleString()}\n`;
+                    }
+                    if (copilot.error) {
+                        info += `Error: ${copilot.error}\n`;
+                    }
+                }
+            } else {
+                info += `\n--- GitHub Copilot ---\n`;
+                info += `Status: Information not available\n`;
             }
             
             if (instance.arguments.length > 0) {
