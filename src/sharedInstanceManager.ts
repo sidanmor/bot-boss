@@ -181,8 +181,11 @@ export class SharedInstanceManager {
                     // Clean up stale instances while we're at it
                     const cleanInstances = this.removeStaleInstances(filteredInstances);
                     
+                    // Sort instances by startup time to maintain consistent order
+                    const sortedInstances = cleanInstances.sort((a, b) => a.startTime - b.startTime);
+                    
                     // Write back to file
-                    await this.writeSharedFile(cleanInstances);
+                    await this.writeSharedFile(sortedInstances);
                 });
                 
                 return; // Success
@@ -209,14 +212,18 @@ export class SharedInstanceManager {
             const cleanInstances = this.removeStaleInstances(sharedInstances);
             console.log(`[BotBoss] SharedInstanceManager: After removing stale instances: ${cleanInstances.length} instances`);
             
+            // Sort instances by startup time to maintain consistent order
+            const sortedInstances = cleanInstances.sort((a, b) => a.startTime - b.startTime);
+            console.log(`[BotBoss] SharedInstanceManager: Sorted ${sortedInstances.length} instances by startup time`);
+            
             // Update file with clean instances if we removed any stale ones
             if (cleanInstances.length !== sharedInstances.length) {
                 console.log(`[BotBoss] SharedInstanceManager: Removed ${sharedInstances.length - cleanInstances.length} stale instances`);
-                await this.writeSharedFile(cleanInstances);
+                await this.writeSharedFile(sortedInstances);
             }
             
             // Convert to VSCodeInstance format
-            const result = cleanInstances.map(data => this.convertToVSCodeInstance(data));
+            const result = sortedInstances.map(data => this.convertToVSCodeInstance(data));
             console.log(`[BotBoss] SharedInstanceManager: Returning ${result.length} instances to caller`);
             result.forEach((instance, index) => {
                 console.log(`[BotBoss] SharedInstanceManager: Instance ${index + 1}: ${instance.name} (PID: ${instance.pid})`);
@@ -465,7 +472,9 @@ export class SharedInstanceManager {
             await this.withFileLock(async () => {
                 const allInstances = await this.readSharedFile();
                 const filteredInstances = allInstances.filter(inst => inst.sessionId !== this.currentSessionId);
-                await this.writeSharedFile(filteredInstances);
+                // Sort remaining instances by startup time to maintain order
+                const sortedInstances = filteredInstances.sort((a, b) => a.startTime - b.startTime);
+                await this.writeSharedFile(sortedInstances);
             });
             console.log('Removed current instance from shared file');
         } catch (error) {
