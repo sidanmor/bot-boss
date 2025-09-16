@@ -7,6 +7,7 @@ import { VSCodeInstance, GitInfo } from './vscodeInstanceService';
 export interface SharedInstanceData {
     pid: number;
     sessionId: string;
+    instanceId: string; // GUID for consistent ordering
     name: string;
     workspacePath?: string;
     windowTitle?: string;
@@ -21,6 +22,7 @@ export class SharedInstanceManager {
     private readonly sharedFilePath: string;
     private readonly lockFilePath: string;
     private currentSessionId: string;
+    private currentInstanceId: string; // GUID for this instance
     private heartbeatInterval?: NodeJS.Timeout;
     private readonly heartbeatIntervalMs = 5000; // 5 seconds for real-time updates
     private readonly staleThresholdMs = 15000; // 15 seconds (3x heartbeat)
@@ -42,7 +44,9 @@ export class SharedInstanceManager {
         this.sharedFilePath = sharedFilePath;
         this.lockFilePath = lockFilePath;
         this.currentSessionId = this.generateSessionId();
+        this.currentInstanceId = this.generateGUID();
         console.log(`[BotBoss] Using shared file: ${this.sharedFilePath}`);
+        console.log(`[BotBoss] Instance ID: ${this.currentInstanceId}`);
     }
 
     public static getInstance(): SharedInstanceManager {
@@ -59,6 +63,17 @@ export class SharedInstanceManager {
         const timestamp = Date.now();
         const random = Math.random().toString(36).substring(2, 15);
         return `${process.pid}-${timestamp}-${random}`;
+    }
+
+    /**
+     * Generate a GUID for consistent instance ordering
+     */
+    private generateGUID(): string {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            const r = Math.random() * 16 | 0;
+            const v = c === 'x' ? r : (r & 0x3 | 0x8);
+            return v.toString(16);
+        });
     }
 
     /**
@@ -89,6 +104,7 @@ export class SharedInstanceManager {
         const instanceData: SharedInstanceData = {
             pid: process.pid,
             sessionId: this.currentSessionId,
+            instanceId: this.currentInstanceId,
             name: 'VS Code - Current Instance',
             lastUpdated: Date.now(),
             startTime: Date.now() - (process.uptime() * 1000),
@@ -181,8 +197,8 @@ export class SharedInstanceManager {
                     // Clean up stale instances while we're at it
                     const cleanInstances = this.removeStaleInstances(filteredInstances);
                     
-                    // Sort instances by startup time to maintain consistent order
-                    const sortedInstances = cleanInstances.sort((a, b) => a.startTime - b.startTime);
+                    // Sort instances by instanceId (GUID) to maintain consistent order
+                    const sortedInstances = cleanInstances.sort((a, b) => a.instanceId.localeCompare(b.instanceId));
                     
                     // Write back to file
                     await this.writeSharedFile(sortedInstances);
@@ -212,9 +228,9 @@ export class SharedInstanceManager {
             const cleanInstances = this.removeStaleInstances(sharedInstances);
             console.log(`[BotBoss] SharedInstanceManager: After removing stale instances: ${cleanInstances.length} instances`);
             
-            // Sort instances by startup time to maintain consistent order
-            const sortedInstances = cleanInstances.sort((a, b) => a.startTime - b.startTime);
-            console.log(`[BotBoss] SharedInstanceManager: Sorted ${sortedInstances.length} instances by startup time`);
+            // Sort instances by instanceId (GUID) to maintain consistent order
+            const sortedInstances = cleanInstances.sort((a, b) => a.instanceId.localeCompare(b.instanceId));
+            console.log(`[BotBoss] SharedInstanceManager: Sorted ${sortedInstances.length} instances by instanceId`);
             
             // Update file with clean instances if we removed any stale ones
             if (cleanInstances.length !== sharedInstances.length) {
@@ -472,8 +488,8 @@ export class SharedInstanceManager {
             await this.withFileLock(async () => {
                 const allInstances = await this.readSharedFile();
                 const filteredInstances = allInstances.filter(inst => inst.sessionId !== this.currentSessionId);
-                // Sort remaining instances by startup time to maintain order
-                const sortedInstances = filteredInstances.sort((a, b) => a.startTime - b.startTime);
+                // Sort remaining instances by instanceId (GUID) to maintain order
+                const sortedInstances = filteredInstances.sort((a, b) => a.instanceId.localeCompare(b.instanceId));
                 await this.writeSharedFile(sortedInstances);
             });
             console.log('Removed current instance from shared file');
