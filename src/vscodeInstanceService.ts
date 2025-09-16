@@ -936,35 +936,24 @@ export class VSCodeInstanceService {
      */
     async focusInstance(pid: number): Promise<void> {
         try {
-            // PowerShell command to bring window to front
-            const command = `
-                Add-Type -TypeDefinition @"
-                    using System;
-                    using System.Runtime.InteropServices;
-                    public class Win32 {
-                        [DllImport("user32.dll")]
-                        public static extern bool SetForegroundWindow(IntPtr hWnd);
-                        [DllImport("user32.dll")]
-                        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-                        [DllImport("user32.dll")]
-                        public static extern IntPtr GetMainWindowHandle(int processId);
-                    }
-"@
-                $hwnd = [Win32]::GetMainWindowHandle(${pid})
-                if ($hwnd -ne [IntPtr]::Zero) {
-                    [Win32]::ShowWindow($hwnd, 9) # SW_RESTORE
-                    [Win32]::SetForegroundWindow($hwnd)
-                    Write-Output "Window focused successfully"
-                } else {
-                    Write-Output "Could not find window handle"
-                }
-            `;
-            
-            await execAsync(`powershell.exe -Command "${command}"`);
-            vscode.window.showInformationMessage(`Focused VS Code instance (PID: ${pid})`);
+            console.log(`Opening workspace for VS Code instance with PID: ${pid}`);
+
+            // Get the workspace path for this PID
+            const instances = await this.getVSCodeInstances();
+            const targetInstance = instances.find(inst => inst.pid === pid);
+
+            if (targetInstance && targetInstance.workspacePath && fs.existsSync(targetInstance.workspacePath)) {
+                // Open workspace in current window
+                const uri = vscode.Uri.file(targetInstance.workspacePath);
+                await vscode.commands.executeCommand('vscode.openFolder', uri, false);
+                vscode.window.showInformationMessage(`Opened workspace: ${path.basename(targetInstance.workspacePath)}`);
+            } else {
+                vscode.window.showWarningMessage(`Could not open workspace for VS Code instance (PID: ${pid}) - no workspace path available or path doesn't exist`);
+            }
+
         } catch (error) {
-            console.error('Error focusing window:', error);
-            vscode.window.showErrorMessage(`Failed to focus VS Code instance: ${error}`);
+            console.error('Error opening workspace:', error);
+            vscode.window.showErrorMessage(`Failed to open workspace for VS Code instance (PID: ${pid}): ${error}`);
         }
     }
 
