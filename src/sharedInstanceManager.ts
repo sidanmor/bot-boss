@@ -301,11 +301,36 @@ export class SharedInstanceManager {
             }
             console.log(`[BotBoss] Read from shared file (${this.sharedFilePath}):\n${content}`);
             const data = JSON.parse(content);
-            return Array.isArray(data) ? data : [];
+            const instances = Array.isArray(data) ? data : [];
+            
+            // Ensure all instances have instanceId (for backward compatibility)
+            return instances.map(instance => {
+                if (!instance.instanceId) {
+                    // Generate a deterministic instanceId based on sessionId for consistency
+                    instance.instanceId = this.generateDeterministicGUID(instance.sessionId);
+                    console.log(`[BotBoss] Added missing instanceId ${instance.instanceId} for session ${instance.sessionId}`);
+                }
+                return instance;
+            });
         } catch (error) {
             console.log('Error reading shared file, creating new one:', error);
             return [];
         }
+    }
+
+    /**
+     * Generate a deterministic GUID based on input string (for backward compatibility)
+     */
+    private generateDeterministicGUID(input: string): string {
+        // Create a simple hash-based GUID from the input string
+        let hash = 0;
+        for (let i = 0; i < input.length; i++) {
+            hash = ((hash << 5) - hash + input.charCodeAt(i)) & 0xffffffff;
+        }
+        
+        // Convert hash to hex and pad to create GUID format
+        const hex = Math.abs(hash).toString(16).padStart(8, '0');
+        return `${hex.substr(0, 8)}-${hex.substr(0, 4)}-4${hex.substr(1, 3)}-${hex.substr(0, 4)}-${hex}${hex.substr(0, 4)}`;
     }
 
     /**
