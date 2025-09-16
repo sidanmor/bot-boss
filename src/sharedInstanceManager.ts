@@ -25,8 +25,9 @@ export class SharedInstanceManager {
     private currentSessionId: string;
     private currentInstanceId: string; // GUID for this instance
     private heartbeatInterval?: NodeJS.Timeout;
-    private readonly heartbeatIntervalMs = 5000; // 5 seconds for real-time updates
-    private readonly staleThresholdMs = 15000; // 15 seconds (3x heartbeat)
+    // Heartbeat interval increased to 10s to reduce churn & tooltip flicker side-effects
+    private readonly heartbeatIntervalMs = 10000; // 10 seconds for updates
+    private readonly staleThresholdMs = 30000; // 30 seconds (3x heartbeat)
     private fileWatcher?: fs.FSWatcher;
     private changeCallbacks: Set<() => void> = new Set();
 

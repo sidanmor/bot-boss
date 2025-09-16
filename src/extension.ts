@@ -211,8 +211,13 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
 
     async refreshInstances(): Promise<void> {
         try {
-            this.instances = await this.instanceService.getVSCodeInstances();
-            this._onDidChangeTreeData.fire();
+            const newInstances = await this.instanceService.getVSCodeInstances();
+            // Determine if there are meaningful changes before firing event to preserve tooltips during hover
+            const changed = this.haveInstancesChanged(this.instances, newInstances);
+            this.instances = newInstances;
+            if (changed) {
+                this._onDidChangeTreeData.fire();
+            }
         } catch (error) {
             console.error('Error refreshing instances:', error);
             
@@ -228,6 +233,24 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
                 this._onDidChangeTreeData.fire();
             }
         }
+    }
+
+    private haveInstancesChanged(oldList: VSCodeInstance[], newList: VSCodeInstance[]): boolean {
+        if (oldList.length !== newList.length) return true;
+        const byKey = (inst: VSCodeInstance) => inst.workspacePath || `pid_${inst.pid}`;
+        const oldMap = new Map(oldList.map(i => [byKey(i), i]));
+        for (const n of newList) {
+            const o = oldMap.get(byKey(n));
+            if (!o) return true;
+            // Compare fields that affect UI (avoid uptime / memory churn causing tooltip flicker)
+            if (o.name !== n.name) return true;
+            if ((o.gitInfo?.branch) !== (n.gitInfo?.branch)) return true;
+            if ((o.gitInfo?.hasChanges) !== (n.gitInfo?.hasChanges)) return true;
+            if ((o.gitInfo?.ahead) !== (n.gitInfo?.ahead)) return true;
+            if ((o.gitInfo?.behind) !== (n.gitInfo?.behind)) return true;
+            if ((o.copilotInfo?.status) !== (n.copilotInfo?.status)) return true;
+        }
+        return false;
     }
 
     getInstanceByPid(pid: number): VSCodeInstance | undefined {
@@ -416,7 +439,7 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
         }
         
         if (this.contextValue === 'status') {
-            return `Live monitoring active\nAuto-refresh every 3 seconds\nFile watcher enabled`;
+            return `Live monitoring active\nAuto-refresh every 10 seconds\nFile watcher enabled`;
         }
         
         return this.label;
@@ -617,7 +640,7 @@ export function activate(context: vscode.ExtensionContext) {
         
         let statusInfo = `Shared File Status\n\n`;
         statusInfo += `Total instances: ${instances.length}\n`;
-        statusInfo += `Update interval: 5 seconds\n`;
+    statusInfo += `Update interval: 10 seconds\n`;
         statusInfo += `File watcher: Active\n`;
         statusInfo += `Last check: ${new Date().toLocaleString()}\n\n`;
         
@@ -639,10 +662,10 @@ export function activate(context: vscode.ExtensionContext) {
         await vscode.window.showTextDocument(doc);
     });
 
-    // Auto-refresh every 3 seconds for real-time updates
+    // Auto-refresh every 10 seconds (reduced from 3s to limit tooltip flicker and resource usage)
     const autoRefreshInterval = setInterval(async () => {
         await provider.refreshInstances();
-    }, 3000);
+    }, 10000);
 
     context.subscriptions.push(refreshCommand);
     context.subscriptions.push(focusCommand);
