@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { VSCodeInstanceService, VSCodeInstance } from "./vscodeInstanceService";
+import { SharedInstanceManager } from "./sharedInstanceManager";
 
 // Tree data provider for VS Code instances
 class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTreeItem> {
@@ -20,16 +21,31 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
 
     async getChildren(element?: VSCodeInstanceTreeItem): Promise<VSCodeInstanceTreeItem[]> {
         if (!element) {
-            // Root level - show VS Code instances
+            // Root level - show status and VS Code instances
+            const children: VSCodeInstanceTreeItem[] = [];
+            
+            // Add live status indicator
+            const statusItem = new VSCodeInstanceTreeItem(
+                `🟢 Live Monitor (${this.instances.length} instances)`,
+                vscode.TreeItemCollapsibleState.None,
+                'status',
+                undefined,
+                undefined
+            );
+            statusItem.description = `Updated: ${new Date().toLocaleTimeString()}`;
+            children.push(statusItem);
+            
             if (this.instances.length === 0) {
-                return [new VSCodeInstanceTreeItem(
+                children.push(new VSCodeInstanceTreeItem(
                     'No VS Code instances found',
                     vscode.TreeItemCollapsibleState.None,
                     'message'
-                )];
+                ));
+                return children;
             }
 
-            return this.instances.map(instance => {
+            // Add all instances
+            const instanceItems = this.instances.map(instance => {
                 const treeItem = new VSCodeInstanceTreeItem(
                     instance.name,
                     vscode.TreeItemCollapsibleState.Collapsed,
@@ -43,6 +59,9 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
                 );
                 return treeItem;
             });
+            
+            children.push(...instanceItems);
+            return children;
         } else if (element.instance) {
             // Show instance details
             const instance = element.instance;
@@ -151,7 +170,18 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
             this._onDidChangeTreeData.fire();
         } catch (error) {
             console.error('Error refreshing instances:', error);
-            vscode.window.showErrorMessage(`Failed to refresh VS Code instances: ${error}`);
+            
+            // Don't show error message on every refresh failure - just log it
+            // Only show error if we have no instances at all
+            if (this.instances.length === 0) {
+                vscode.window.showErrorMessage(`Failed to refresh VS Code instances: ${error}`);
+            }
+            
+            // Try to recover by using cached data if available
+            if (this.instances.length > 0) {
+                console.log('Using cached instance data due to refresh error');
+                this._onDidChangeTreeData.fire();
+            }
         }
     }
 
@@ -194,6 +224,11 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
         
         let desc = `${this.instance.memory}MB`;
         
+        // Add uptime if available
+        if (this.instance.uptime) {
+            desc += ` • ${this.instance.uptime}`;
+        }
+        
         if (this.instance.gitInfo?.isGitRepo && this.instance.gitInfo.branch) {
             desc += ` • ${this.instance.gitInfo.branch}`;
             
@@ -215,7 +250,7 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
 
     private createTooltip(): string {
         if (this.instance) {
-            let tooltip = `VS Code Instance\n`;
+            let tooltip = `VS Code Instance (Live)\n`;
             tooltip += `PID: ${this.instance.pid}\n`;
             tooltip += `Memory: ${this.instance.memory} MB\n`;
             
@@ -231,8 +266,31 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
                 tooltip += `CPU: ${this.instance.cpu.toFixed(1)}%\n`;
             }
             
+            // Add git information if available
+            if (this.instance.gitInfo?.isGitRepo) {
+                tooltip += `\n--- Git Info ---\n`;
+                if (this.instance.gitInfo.branch) {
+                    tooltip += `Branch: ${this.instance.gitInfo.branch}\n`;
+                }
+                if (this.instance.gitInfo.hasChanges !== undefined) {
+                    tooltip += `Changes: ${this.instance.gitInfo.hasChanges ? 'Yes' : 'No'}\n`;
+                }
+                if (this.instance.gitInfo.ahead || this.instance.gitInfo.behind) {
+                    tooltip += `Sync: `;
+                    if (this.instance.gitInfo.ahead) tooltip += `↑${this.instance.gitInfo.ahead} `;
+                    if (this.instance.gitInfo.behind) tooltip += `↓${this.instance.gitInfo.behind}`;
+                    tooltip += `\n`;
+                }
+            }
+            
+            tooltip += `\nLast seen: ${new Date().toLocaleTimeString()}`;
             return tooltip;
         }
+        
+        if (this.contextValue === 'status') {
+            return `Live monitoring active\nAuto-refresh every 3 seconds\nFile watcher enabled`;
+        }
+        
         return this.label;
     }
 
@@ -256,6 +314,8 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
                 return new vscode.ThemeIcon('info');
             case 'message':
                 return new vscode.ThemeIcon('question');
+            case 'status':
+                return new vscode.ThemeIcon('pulse');
             default:
                 return undefined;
         }
@@ -265,9 +325,23 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
 export function activate(context: vscode.ExtensionContext) {
     console.log("Bot Boss - VS Code Instance Manager is now active!");
 
+    // Initialize SharedInstanceManager and register current instance
+    const sharedManager = SharedInstanceManager.getInstance();
+    sharedManager.registerCurrentInstance().catch(error => {
+        console.error('Failed to register current instance:', error);
+    });
+
     // Create and register the tree data provider
     const provider = new VSCodeInstanceProvider();
     vscode.window.registerTreeDataProvider('vscodeInstancesExplorer', provider);
+
+    // Set up real-time updates via file watcher
+    sharedManager.onSharedFileChange(() => {
+        console.log('Shared file changed - refreshing instances');
+        provider.refreshInstances().catch(error => {
+            console.error('Failed to refresh instances on file change:', error);
+        });
+    });
 
     // Register refresh command
     let refreshCommand = vscode.commands.registerCommand('bot-boss.refreshInstances', async () => {
@@ -368,20 +442,74 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage(`Debug: Found ${instances.length} VS Code instances. Check Debug Console for details.`);
     });
 
-    // Auto-refresh every 30 seconds
+    // Register force registration command for testing
+    let forceRegisterCommand = vscode.commands.registerCommand('bot-boss.forceRegister', async () => {
+        const sharedManager = SharedInstanceManager.getInstance();
+        await sharedManager.registerCurrentInstance();
+        vscode.window.showInformationMessage('Force registered current instance to shared file!');
+        
+        // Also refresh the view
+        await provider.refreshInstances();
+    });
+
+    // Register shared file status command
+    let statusCommand = vscode.commands.registerCommand('bot-boss.showSharedFileStatus', async () => {
+        const sharedManager = SharedInstanceManager.getInstance();
+        const instances = await sharedManager.getAllInstances();
+        
+        let statusInfo = `Shared File Status\n\n`;
+        statusInfo += `Total instances: ${instances.length}\n`;
+        statusInfo += `Update interval: 5 seconds\n`;
+        statusInfo += `File watcher: Active\n`;
+        statusInfo += `Last check: ${new Date().toLocaleString()}\n\n`;
+        
+        if (instances.length > 0) {
+            statusInfo += `--- Instance Details ---\n`;
+            instances.forEach((instance, index) => {
+                statusInfo += `${index + 1}. ${instance.name}\n`;
+                statusInfo += `   PID: ${instance.pid}\n`;
+                statusInfo += `   Memory: ${instance.memory}MB\n`;
+                statusInfo += `   Workspace: ${instance.workspacePath || 'None'}\n\n`;
+            });
+        }
+
+        // Show in a new document
+        const doc = await vscode.workspace.openTextDocument({
+            content: statusInfo,
+            language: 'plaintext'
+        });
+        await vscode.window.showTextDocument(doc);
+    });
+
+    // Auto-refresh every 3 seconds for real-time updates
     const autoRefreshInterval = setInterval(async () => {
         await provider.refreshInstances();
-    }, 30000);
+    }, 3000);
 
     context.subscriptions.push(refreshCommand);
     context.subscriptions.push(focusCommand);
     context.subscriptions.push(workspaceInfoCommand);
     context.subscriptions.push(debugCommand);
+    context.subscriptions.push(forceRegisterCommand);
+    context.subscriptions.push(statusCommand);
     context.subscriptions.push({
         dispose: () => clearInterval(autoRefreshInterval)
+    });
+
+    // Register cleanup for SharedInstanceManager
+    context.subscriptions.push({
+        dispose: async () => {
+            await sharedManager.cleanup();
+        }
     });
 }
 
 export function deactivate() {
     console.log("Bot Boss - VS Code Instance Manager is now deactivated!");
+    
+    // Cleanup SharedInstanceManager
+    const sharedManager = SharedInstanceManager.getInstance();
+    sharedManager.cleanup().catch(error => {
+        console.error('Failed to cleanup SharedInstanceManager:', error);
+    });
 }

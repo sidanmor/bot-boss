@@ -33,6 +33,16 @@
             {
                 "command": "bot-boss.debugDetection",
                 "title": "Debug Instance Detection"
+            },
+            {
+                "command": "bot-boss.forceRegister",
+                "title": "Force Register Current Instance",
+                "icon": "$(add)"
+            },
+            {
+                "command": "bot-boss.showSharedFileStatus",
+                "title": "Show Shared File Status",
+                "icon": "$(pulse)"
             }
         ],
         "viewsContainers": {
@@ -62,6 +72,16 @@
                 },
                 {
                     "command": "bot-boss.debugDetection",
+                    "when": "view == vscodeInstancesExplorer",
+                    "group": "navigation"
+                },
+                {
+                    "command": "bot-boss.forceRegister",
+                    "when": "view == vscodeInstancesExplorer",
+                    "group": "navigation"
+                },
+                {
+                    "command": "bot-boss.showSharedFileStatus",
                     "when": "view == vscodeInstancesExplorer",
                     "group": "navigation"
                 }

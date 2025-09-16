@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { spawn, exec } from 'child_process';
 import { promisify } from 'util';
+import { SharedInstanceManager } from './sharedInstanceManager';
 
 const execAsync = promisify(exec);
 
@@ -46,7 +47,24 @@ export class VSCodeInstanceService {
         try {
             console.log('Starting VS Code instance detection...');
             
-            // Method 1: Process-based detection (primary method)
+            // Method 1: Use SharedInstanceManager (primary method)
+            const sharedManager = SharedInstanceManager.getInstance();
+            const sharedInstances = await sharedManager.getAllInstances();
+            console.log(`[BotBoss] VSCodeInstanceService: Shared file detection returned ${sharedInstances.length} instances`);
+            
+            // If shared file method returns instances, use it
+            if (sharedInstances.length > 0) {
+                console.log(`[BotBoss] VSCodeInstanceService: Using shared file data for ${sharedInstances.length} instances`);
+                sharedInstances.forEach((instance, index) => {
+                    console.log(`[BotBoss] VSCodeInstanceService: Instance ${index + 1}: ${instance.name} (PID: ${instance.pid}, Path: ${instance.workspacePath || 'No workspace'})`);
+                });
+                return sharedInstances;
+            } else {
+                console.log(`[BotBoss] VSCodeInstanceService: Shared file returned 0 instances, checking shared manager state...`);
+            }
+            
+            // Fallback: Use process-based detection if shared file is empty
+            console.log('Shared file is empty, falling back to process detection...');
             const processInstances = await this.getInstancesFromProcesses();
             console.log(`Process detection returned ${processInstances.length} instances`);
             
