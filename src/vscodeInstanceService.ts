@@ -1,9 +1,21 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 import { spawn, exec } from 'child_process';
 import { promisify } from 'util';
 
 const execAsync = promisify(exec);
+
+export interface GitInfo {
+    branch?: string;
+    isGitRepo: boolean;
+    hasChanges?: boolean;
+    remoteUrl?: string;
+    lastCommit?: string;
+    ahead?: number;
+    behind?: number;
+}
 
 export interface VSCodeInstance {
     pid: number;
@@ -14,6 +26,7 @@ export interface VSCodeInstance {
     cpu: number;
     memory: number;
     uptime?: string;
+    gitInfo?: GitInfo;
 }
 
 export class VSCodeInstanceService {
@@ -27,21 +40,70 @@ export class VSCodeInstanceService {
     }
 
     /**
-     * Get all running VS Code instances
+     * Get all running VS Code instances using multiple methods
      */
     async getVSCodeInstances(): Promise<VSCodeInstance[]> {
         try {
-            const processes = await this.getVSCodeProcesses();
-            const instances: VSCodeInstance[] = [];
-
-            for (const process of processes) {
-                const instance = await this.extractInstanceInfo(process);
-                if (instance) {
-                    instances.push(instance);
+            console.log('Starting VS Code instance detection...');
+            
+            // Method 1: Process-based detection (primary method)
+            const processInstances = await this.getInstancesFromProcesses();
+            console.log(`Process detection returned ${processInstances.length} instances`);
+            
+            // Method 2: Add current instance from VS Code API if not already included
+            const currentInstance = await this.getCurrentInstanceFromAPI();
+            if (currentInstance) {
+                console.log(`Current instance from API: ${currentInstance.name} (PID: ${currentInstance.pid})`);
+                // Check if current instance is already in the process list by PID
+                const exists = processInstances.find(inst => inst.pid === currentInstance.pid);
+                if (!exists) {
+                    console.log('Adding current instance to list (not found in processes)');
+                    processInstances.push(currentInstance);
+                } else {
+                    console.log('Current instance already found in process list - updating with API info');
+                    // Update the existing instance with more accurate API information
+                    const existingIndex = processInstances.findIndex(inst => inst.pid === currentInstance.pid);
+                    if (existingIndex !== -1) {
+                        // Merge API data with process data, preferring API data for current instance
+                        processInstances[existingIndex] = {
+                            ...processInstances[existingIndex],
+                            ...currentInstance,
+                            // Keep the better name if available
+                            name: currentInstance.name || processInstances[existingIndex].name
+                        };
+                    }
                 }
             }
 
-            return instances;
+            // Method 3: Try VS Code API method as backup for additional instances
+            try {
+                const apiInstances = await this.getInstancesFromVSCodeAPI();
+                console.log(`VS Code API method found ${apiInstances.length} additional instances`);
+                
+                for (const apiInstance of apiInstances) {
+                    const exists = processInstances.find(inst => 
+                        inst.pid === apiInstance.pid || 
+                        (inst.workspacePath && apiInstance.workspacePath && inst.workspacePath === apiInstance.workspacePath)
+                    );
+                    
+                    if (!exists) {
+                        console.log(`Adding additional instance from API: ${apiInstance.name}`);
+                        processInstances.push(apiInstance);
+                    }
+                }
+            } catch (apiError) {
+                console.log('VS Code API method failed:', apiError);
+            }
+
+            // Deduplicate and clean up instances
+            const uniqueInstances = this.deduplicateInstances(processInstances);
+
+            console.log(`Final result: ${uniqueInstances.length} unique VS Code instances`);
+            uniqueInstances.forEach((instance, index) => {
+                console.log(`Instance ${index + 1}: ${instance.name} (PID: ${instance.pid}, Path: ${instance.workspacePath || 'No workspace'})`);
+            });
+            
+            return uniqueInstances;
         } catch (error) {
             console.error('Error getting VS Code instances:', error);
             vscode.window.showErrorMessage(`Failed to get VS Code instances: ${error}`);
@@ -50,51 +112,449 @@ export class VSCodeInstanceService {
     }
 
     /**
-     * Get VS Code processes using PowerShell on Windows
+     * Get current instance info using VS Code API
      */
-    private async getVSCodeProcesses(): Promise<any[]> {
+    private async getInstancesFromVSCodeAPI(): Promise<VSCodeInstance[]> {
+        const instances: VSCodeInstance[] = [];
+        
         try {
-            // PowerShell command to get Code.exe processes with detailed info
-            const command = `Get-Process -Name "Code" -ErrorAction SilentlyContinue | Where-Object {$_.ProcessName -eq "Code"} | Select-Object Id, ProcessName, CommandLine, CPU, WorkingSet, StartTime | ConvertTo-Json`;
-            
-            const { stdout } = await execAsync(`powershell.exe -Command "${command}"`);
-            
-            if (!stdout.trim()) {
-                return [];
+            // Method 1: Current instance from VS Code API
+            const currentInstance = await this.getCurrentInstanceFromAPI();
+            if (currentInstance) {
+                instances.push(currentInstance);
             }
 
-            const result = JSON.parse(stdout);
-            // Handle both single process (object) and multiple processes (array)
-            return Array.isArray(result) ? result : [result];
+            // Method 2: Try to find other instances through VS Code's user data directory
+            const otherInstances = await this.getInstancesFromUserDataDir();
+            instances.push(...otherInstances);
+
         } catch (error) {
-            console.error('Error getting processes:', error);
-            
-            // Fallback: try with tasklist if PowerShell fails
-            try {
-                const { stdout } = await execAsync('tasklist /fi "imagename eq Code.exe" /fo csv');
-                const lines = stdout.split('\n').slice(1); // Skip header
-                const processes = [];
+            console.error('Error getting instances from VS Code API:', error);
+        }
+
+        return instances;
+    }
+
+    /**
+     * Get current VS Code instance using the extension API
+     */
+    private async getCurrentInstanceFromAPI(): Promise<VSCodeInstance | null> {
+        try {
+            const currentInstance: VSCodeInstance = {
+                pid: process.pid,
+                name: 'VS Code - Current Instance',
+                arguments: process.argv,
+                cpu: 0,
+                memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+                uptime: this.calculateUptimeFromSeconds(process.uptime())
+            };
+
+            // Get workspace information
+            if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+                const workspaceFolder = vscode.workspace.workspaceFolders[0];
+                currentInstance.workspacePath = workspaceFolder.uri.fsPath;
+                currentInstance.name = `VS Code - ${path.basename(workspaceFolder.uri.fsPath)}`;
                 
-                for (const line of lines) {
-                    if (line.trim()) {
-                        const parts = line.split(',').map(p => p.replace(/"/g, ''));
-                        if (parts.length >= 2) {
-                            processes.push({
-                                Id: parseInt(parts[1]),
-                                ProcessName: parts[0],
-                                WorkingSet: parts[4] || '0',
-                                CPU: 0,
-                                CommandLine: '',
-                                StartTime: null
-                            });
+                // Get git info for current workspace
+                currentInstance.gitInfo = await this.getGitInfo(workspaceFolder.uri.fsPath);
+            } else if (vscode.workspace.name) {
+                currentInstance.name = `VS Code - ${vscode.workspace.name}`;
+            }
+
+            return currentInstance;
+        } catch (error) {
+            console.error('Error getting current instance:', error);
+            return null;
+        }
+    }
+
+    /**
+     * Try to find other VS Code instances by looking at user data directory
+     */
+    private async getInstancesFromUserDataDir(): Promise<VSCodeInstance[]> {
+        const instances: VSCodeInstance[] = [];
+        
+        try {
+            // VS Code stores instance information in the user data directory
+            const userDataDir = this.getVSCodeUserDataDir();
+            if (!userDataDir || !fs.existsSync(userDataDir)) {
+                return instances;
+            }
+
+            // Look for running instances in logs or session files
+            const logsDir = path.join(userDataDir, 'logs');
+            if (fs.existsSync(logsDir)) {
+                const logEntries = fs.readdirSync(logsDir);
+                
+                for (const entry of logEntries) {
+                    const logPath = path.join(logsDir, entry);
+                    if (fs.statSync(logPath).isDirectory()) {
+                        // Each directory might represent a running instance
+                        const rendererLogPath = path.join(logPath, 'renderer1.log');
+                        if (fs.existsSync(rendererLogPath)) {
+                            try {
+                                const stats = fs.statSync(rendererLogPath);
+                                const timeDiff = Date.now() - stats.mtime.getTime();
+                                
+                                // If log was modified recently (within 5 minutes), instance might be running
+                                if (timeDiff < 5 * 60 * 1000) {
+                                    // Try to extract instance info from log directory name or content
+                                    const instanceInfo = await this.extractInstanceFromLogDir(logPath);
+                                    if (instanceInfo) {
+                                        instances.push(instanceInfo);
+                                    }
+                                }
+                            } catch (logError) {
+                                console.log('Error reading log file:', logError);
+                            }
                         }
                     }
                 }
-                return processes;
-            } catch (fallbackError) {
-                console.error('Fallback method also failed:', fallbackError);
+            }
+        } catch (error) {
+            console.error('Error getting instances from user data dir:', error);
+        }
+
+        return instances;
+    }
+
+    /**
+     * Get VS Code user data directory
+     */
+    private getVSCodeUserDataDir(): string | null {
+        const platform = os.platform();
+        const homeDir = os.homedir();
+
+        switch (platform) {
+            case 'win32':
+                return path.join(homeDir, 'AppData', 'Roaming', 'Code');
+            case 'darwin':
+                return path.join(homeDir, 'Library', 'Application Support', 'Code');
+            case 'linux':
+                return path.join(homeDir, '.config', 'Code');
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * Extract instance information from a log directory
+     */
+    private async extractInstanceFromLogDir(logPath: string): Promise<VSCodeInstance | null> {
+        try {
+            // The log directory name sometimes contains timestamp or session info
+            const dirName = path.basename(logPath);
+            
+            // Try to read recent log entries to get workspace info
+            const mainLogPath = path.join(logPath, 'main.log');
+            if (fs.existsSync(mainLogPath)) {
+                const logContent = fs.readFileSync(mainLogPath, 'utf8');
+                const lines = logContent.split('\n').slice(-100); // Read last 100 lines
+                
+                let workspacePath: string | undefined;
+                let pid: number | undefined;
+
+                for (const line of lines) {
+                    // Look for workspace information in logs
+                    if (line.includes('workspace:') || line.includes('folder:')) {
+                        const match = line.match(/(?:workspace:|folder:)\s*([^\s]+)/);
+                        if (match && match[1]) {
+                            workspacePath = match[1];
+                        }
+                    }
+                    
+                    // Look for PID information
+                    if (line.includes('pid:') || line.includes('process')) {
+                        const match = line.match(/pid:?\s*(\d+)/);
+                        if (match && match[1]) {
+                            pid = parseInt(match[1]);
+                        }
+                    }
+                }
+
+                if (workspacePath || pid) {
+                    const instance: VSCodeInstance = {
+                        pid: pid || Math.floor(Math.random() * 10000), // Fallback to random PID
+                        name: workspacePath ? `VS Code - ${path.basename(workspacePath)}` : `VS Code - ${dirName}`,
+                        arguments: [],
+                        cpu: 0,
+                        memory: 0,
+                        workspacePath
+                    };
+
+                    if (workspacePath && fs.existsSync(workspacePath)) {
+                        instance.gitInfo = await this.getGitInfo(workspacePath);
+                    }
+
+                    return instance;
+                }
+            }
+        } catch (error) {
+            console.error('Error extracting from log dir:', error);
+        }
+
+        return null;
+    }
+
+    /**
+     * Get instances from process detection (fallback method)
+     */
+    private async getInstancesFromProcesses(): Promise<VSCodeInstance[]> {
+        try {
+            const processes = await this.getVSCodeProcesses();
+            console.log(`Raw processes found: ${processes.length}`);
+            
+            const instances: VSCodeInstance[] = [];
+
+            for (const process of processes) {
+                const instance = await this.extractInstanceInfo(process);
+                if (instance) {
+                    console.log(`Added instance: ${instance.name} (PID: ${instance.pid})`);
+                    instances.push(instance);
+                }
+            }
+
+            console.log(`Process detection found ${instances.length} instances`);
+            return instances;
+        } catch (error) {
+            console.error('Error getting instances from processes:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Calculate uptime from seconds
+     */
+    private calculateUptimeFromSeconds(uptimeSeconds: number): string {
+        const hours = Math.floor(uptimeSeconds / 3600);
+        const minutes = Math.floor((uptimeSeconds % 3600) / 60);
+        
+        if (hours > 0) {
+            return `${hours}h ${minutes}m`;
+        } else {
+            return `${minutes}m`;
+        }
+    }
+
+    /**
+     * Remove duplicate instances based on workspace path or PID
+     */
+    private deduplicateInstances(instances: VSCodeInstance[]): VSCodeInstance[] {
+        const seen = new Set<string>();
+        const unique: VSCodeInstance[] = [];
+
+        for (const instance of instances) {
+            // Create a unique key based on workspace path or PID
+            const key = instance.workspacePath || `pid_${instance.pid}`;
+            
+            if (!seen.has(key)) {
+                seen.add(key);
+                unique.push(instance);
+            }
+        }
+
+        return unique;
+    }
+
+    /**
+     * Get VS Code processes using improved detection methods
+     */
+    private async getVSCodeProcesses(): Promise<any[]> {
+        try {
+            // Method 1: Use PowerShell with better filtering
+            const powershellInstances = await this.getVSCodeProcessesPowerShell();
+            if (powershellInstances.length > 0) {
+                return powershellInstances;
+            }
+
+            // Method 2: Use VS Code CLI if available
+            const cliInstances = await this.getVSCodeInstancesFromCLI();
+            if (cliInstances.length > 0) {
+                return cliInstances;
+            }
+
+            // Method 3: Fallback to WMIC
+            return await this.getVSCodeProcessesWMIC();
+        } catch (error) {
+            console.error('Error getting processes:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Use PowerShell with improved process detection
+     */
+    private async getVSCodeProcessesPowerShell(): Promise<any[]> {
+        try {
+            // Enhanced PowerShell command to detect all VS Code main windows
+            const command = `
+                # Get all Code processes
+                $codeProcesses = Get-Process -Name "Code" -ErrorAction SilentlyContinue
+
+                # Get process details with command lines
+                $processDetails = foreach ($proc in $codeProcesses) {
+                    try {
+                        $wmiProcess = Get-WmiObject Win32_Process -Filter "ProcessId = $($proc.Id)" -ErrorAction SilentlyContinue
+                        if ($wmiProcess) {
+                            [PSCustomObject]@{
+                                Id = $proc.Id
+                                ProcessName = $proc.ProcessName
+                                MainWindowTitle = $proc.MainWindowTitle
+                                CommandLine = $wmiProcess.CommandLine
+                                CPU = $proc.CPU
+                                WorkingSet = $proc.WorkingSet
+                                StartTime = $proc.StartTime
+                                HasMainWindow = $proc.MainWindowTitle -ne "" -and $proc.MainWindowTitle -ne $null
+                            }
+                        }
+                    } catch {
+                        # Fallback for processes we can't get WMI info for
+                        [PSCustomObject]@{
+                            Id = $proc.Id
+                            ProcessName = $proc.ProcessName
+                            MainWindowTitle = $proc.MainWindowTitle
+                            CommandLine = ""
+                            CPU = $proc.CPU
+                            WorkingSet = $proc.WorkingSet
+                            StartTime = $proc.StartTime
+                            HasMainWindow = $proc.MainWindowTitle -ne "" -and $proc.MainWindowTitle -ne $null
+                        }
+                    }
+                }
+
+                # Filter to main VS Code processes (not helper processes)
+                $mainProcesses = $processDetails | Where-Object {
+                    # Method 1: Process has a main window (most reliable)
+                    if ($_.HasMainWindow) {
+                        return $true
+                    }
+                    
+                    # Method 2: Command line filtering for processes without windows
+                    if ($_.CommandLine) {
+                        $isHelper = ($_.CommandLine -like "*--type=renderer*") -or
+                                   ($_.CommandLine -like "*--type=utility*") -or
+                                   ($_.CommandLine -like "*--type=gpu-process*") -or
+                                   ($_.CommandLine -like "*--type=extension-host*") -or
+                                   ($_.CommandLine -like "*--type=crashpad-handler*") -or
+                                   ($_.CommandLine -like "*--inspect-extensions*") -or
+                                   ($_.CommandLine -like "*--ms-enable-electron-run-as-node*")
+                        return -not $isHelper
+                    }
+                    
+                    # Method 3: If no command line and no window, likely a helper process
+                    return $false
+                }
+
+                # Convert to JSON
+                if ($mainProcesses) {
+                    $mainProcesses | ConvertTo-Json -Depth 3
+                } else {
+                    "[]"
+                }
+            `;
+            
+            const { stdout } = await execAsync(`powershell.exe -Command "${command}"`);
+            
+            if (!stdout.trim() || stdout.trim() === 'null' || stdout.trim() === '[]') {
+                console.log('PowerShell: No VS Code main processes found');
                 return [];
             }
+
+            let result;
+            try {
+                result = JSON.parse(stdout);
+                const processes = Array.isArray(result) ? result : [result];
+                console.log(`PowerShell: Found ${processes.length} main VS Code processes`);
+                return processes;
+            } catch (parseError) {
+                console.error('Failed to parse PowerShell output:', parseError);
+                console.log('Raw PowerShell output:', stdout);
+                return [];
+            }
+        } catch (error) {
+            console.error('PowerShell method failed:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Try to use VS Code CLI to get running instances
+     */
+    private async getVSCodeInstancesFromCLI(): Promise<any[]> {
+        try {
+            // Try to use 'code --list-extensions' and parse running instances
+            // This is a bit hacky but can work if VS Code CLI is available
+            const { stdout } = await execAsync('code --status');
+            
+            // Parse the status output to get instance information
+            if (stdout.includes('Version:')) {
+                // VS Code is running and CLI is working
+                // We can get current instance info from environment
+                return [{
+                    Id: process.pid,
+                    ProcessName: 'Code',
+                    MainWindowTitle: vscode.workspace.name || 'Visual Studio Code',
+                    WorkingSet: process.memoryUsage().heapUsed,
+                    CPU: 0,
+                    StartTime: new Date(Date.now() - process.uptime() * 1000),
+                    CommandLine: process.argv.join(' ')
+                }];
+            }
+        } catch (error) {
+            console.log('VS Code CLI method not available:', error);
+        }
+        return [];
+    }
+
+    /**
+     * Fallback to WMIC for process detection
+     */
+    private async getVSCodeProcessesWMIC(): Promise<any[]> {
+        try {
+            // Use WMIC to get all Code.exe processes with command lines
+            const { stdout } = await execAsync(`
+                wmic process where "name='Code.exe'" get ProcessId,CommandLine,WorkingSetSize,CreationDate /format:csv
+            `);
+            
+            const lines = stdout.split('\n').slice(1);
+            const processes = [];
+            
+            for (const line of lines) {
+                if (line.trim()) {
+                    const parts = line.split(',');
+                    if (parts.length >= 4) {
+                        const commandLine = parts[2] || '';
+                        const processId = parseInt(parts[4]) || 0;
+                        
+                        if (processId > 0) {
+                            // Filter out helper processes
+                            const isMainProcess = !commandLine.includes('--type=renderer') && 
+                                                !commandLine.includes('--type=utility') &&
+                                                !commandLine.includes('--type=gpu-process') &&
+                                                !commandLine.includes('--type=extension-host') &&
+                                                !commandLine.includes('--inspect-extensions');
+                            
+                            if (isMainProcess) {
+                                processes.push({
+                                    Id: processId,
+                                    ProcessName: 'Code',
+                                    MainWindowTitle: '',
+                                    CommandLine: commandLine,
+                                    WorkingSet: parseInt(parts[5]) || 0,
+                                    CPU: 0,
+                                    StartTime: parts[1] ? new Date(parts[1]) : null
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            
+            console.log(`WMIC found ${processes.length} main VS Code processes`);
+            return processes;
+        } catch (error) {
+            console.error('WMIC method failed:', error);
+            return [];
         }
     }
 
@@ -109,29 +569,63 @@ export class VSCodeInstanceService {
                 arguments: [],
                 cpu: process.CPU || 0,
                 memory: this.parseMemory(process.WorkingSet),
-                uptime: this.calculateUptime(process.StartTime)
+                uptime: this.calculateUptime(process.StartTime),
+                windowTitle: process.MainWindowTitle
             };
 
-            // Try to get command line arguments for more details
-            try {
-                const cmdCommand = `wmic process where "ProcessId=${process.Id}" get CommandLine /format:value`;
-                const { stdout: cmdStdout } = await execAsync(cmdCommand);
-                
-                const commandLineMatch = cmdStdout.match(/CommandLine=(.+)/);
-                if (commandLineMatch && commandLineMatch[1]) {
-                    const commandLine = commandLineMatch[1].trim();
-                    instance.arguments = this.parseCommandLine(commandLine);
+            // Priority 1: Use window title for workspace identification (most reliable for main windows)
+            if (process.MainWindowTitle && process.MainWindowTitle !== 'Visual Studio Code' && process.MainWindowTitle.trim() !== '') {
+                const workspaceFromTitle = this.extractWorkspaceFromTitle(process.MainWindowTitle);
+                if (workspaceFromTitle) {
+                    instance.workspacePath = workspaceFromTitle.path;
+                    instance.name = `VS Code - ${workspaceFromTitle.name}`;
+                    
+                    // Get git information for the workspace
+                    if (fs.existsSync(workspaceFromTitle.path)) {
+                        instance.gitInfo = await this.getGitInfo(workspaceFromTitle.path);
+                    }
+                }
+            }
+
+            // Priority 2: Extract from command line if we don't have workspace from title
+            if (!instance.workspacePath && process.CommandLine) {
+                try {
+                    instance.arguments = this.parseCommandLine(process.CommandLine);
                     
                     // Extract workspace path from arguments
                     const workspacePath = this.extractWorkspacePath(instance.arguments);
-                    if (workspacePath) {
+                    if (workspacePath && fs.existsSync(workspacePath)) {
                         instance.workspacePath = workspacePath;
                         instance.name = `VS Code - ${path.basename(workspacePath)}`;
-                        instance.windowTitle = workspacePath;
+                        
+                        // Get git information for the workspace
+                        instance.gitInfo = await this.getGitInfo(workspacePath);
+                    }
+                } catch (cmdError) {
+                    console.log('Could not parse command line for process:', process.Id);
+                }
+            }
+
+            // Priority 3: If still no workspace, try to get it from recent file arguments
+            if (!instance.workspacePath && process.CommandLine) {
+                const recentFile = this.extractRecentFileFromCommandLine(process.CommandLine);
+                if (recentFile) {
+                    const workspaceDir = path.dirname(recentFile);
+                    if (fs.existsSync(workspaceDir)) {
+                        instance.workspacePath = workspaceDir;
+                        instance.name = `VS Code - ${path.basename(workspaceDir)}`;
+                        instance.gitInfo = await this.getGitInfo(workspaceDir);
                     }
                 }
-            } catch (cmdError) {
-                console.log('Could not get command line for process:', process.Id);
+            }
+
+            // Fallback: Use just the window title or PID if we couldn't determine workspace
+            if (!instance.workspacePath) {
+                if (process.MainWindowTitle && process.MainWindowTitle !== 'Visual Studio Code') {
+                    instance.name = `VS Code - ${process.MainWindowTitle}`;
+                } else {
+                    instance.name = `VS Code (PID: ${process.Id})`;
+                }
             }
 
             return instance;
@@ -139,6 +633,119 @@ export class VSCodeInstanceService {
             console.error('Error extracting instance info:', error);
             return null;
         }
+    }
+
+    /**
+     * Extract workspace information from window title
+     */
+    private extractWorkspaceFromTitle(title: string): { name: string; path: string } | null {
+        if (!title || title === 'Visual Studio Code') {
+            return null;
+        }
+
+        // VS Code window titles typically follow patterns like:
+        // "folder-name - Visual Studio Code"
+        // "file.txt - folder-name - Visual Studio Code"
+        // "● file.txt - folder-name - Visual Studio Code" (with unsaved changes)
+        
+        const parts = title.split(' - ');
+        
+        // Remove "Visual Studio Code" from the end if present
+        if (parts.length > 1 && parts[parts.length - 1] === 'Visual Studio Code') {
+            parts.pop();
+        }
+        
+        if (parts.length === 0) {
+            return null;
+        }
+        
+        // If there's only one part, it's likely the workspace name
+        if (parts.length === 1) {
+            const workspaceName = parts[0].replace(/^●\s*/, '').trim(); // Remove unsaved indicator
+            
+            // Try to construct a likely path
+            const possiblePaths = [
+                path.join('C:', 'Users', os.userInfo().username, 'Documents', workspaceName),
+                path.join('C:', 'Projects', workspaceName),
+                path.join('C:', 'Code', workspaceName),
+                path.join('C:', 'Repos', workspaceName),
+                path.join('C:', 'dev', workspaceName),
+                path.join('C:', workspaceName)
+            ];
+            
+            for (const possiblePath of possiblePaths) {
+                if (fs.existsSync(possiblePath)) {
+                    return { name: workspaceName, path: possiblePath };
+                }
+            }
+            
+            // If no path found, still return the name
+            return { name: workspaceName, path: workspaceName };
+        }
+        
+        // If there are multiple parts, the last one is likely the workspace name
+        const workspaceName = parts[parts.length - 1].trim();
+        
+        // Check if any part looks like a full path
+        for (const part of parts) {
+            const cleanPart = part.replace(/^●\s*/, '').trim();
+            if (this.isValidPath(cleanPart) && fs.existsSync(cleanPart)) {
+                return { name: path.basename(cleanPart), path: cleanPart };
+            }
+        }
+        
+        // Fallback to workspace name
+        return { name: workspaceName, path: workspaceName };
+    }
+
+    /**
+     * Extract recent file path from command line to infer workspace
+     */
+    private extractRecentFileFromCommandLine(commandLine: string): string | null {
+        if (!commandLine) {
+            return null;
+        }
+        
+        // Look for file arguments that might indicate the workspace
+        const args = this.parseCommandLine(commandLine);
+        
+        for (const arg of args) {
+            // Skip VS Code flags and options
+            if (arg.startsWith('-') || arg.startsWith('/')) {
+                continue;
+            }
+            
+            // Check if this looks like a file path
+            if (this.isValidPath(arg)) {
+                // If it's a file, return it; if it's a directory, that's the workspace
+                if (fs.existsSync(arg)) {
+                    const stats = fs.statSync(arg);
+                    if (stats.isFile()) {
+                        return arg; // Return the file path, caller will get directory
+                    } else if (stats.isDirectory()) {
+                        return path.join(arg, 'dummy.txt'); // Return a dummy file in the directory
+                    }
+                }
+            }
+            
+            // Check for VS Code URI format
+            if (arg.startsWith('vscode://')) {
+                try {
+                    const decoded = decodeURIComponent(arg);
+                    const pathMatch = decoded.match(/vscode:\/\/[^\/]+\/(.+)/);
+                    if (pathMatch && pathMatch[1]) {
+                        const filePath = pathMatch[1].replace(/\//g, '\\');
+                        if (this.isValidPath(filePath) && fs.existsSync(filePath)) {
+                            return filePath;
+                        }
+                    }
+                } catch (error) {
+                    // Ignore URI parsing errors
+                }
+            }
+        }
+        
+        return null;
     }
 
     /**
@@ -309,5 +916,71 @@ export class VSCodeInstanceService {
             console.error('Error focusing window:', error);
             vscode.window.showErrorMessage(`Failed to focus VS Code instance: ${error}`);
         }
+    }
+
+    /**
+     * Get git information for a workspace path
+     */
+    async getGitInfo(workspacePath: string): Promise<GitInfo> {
+        const gitInfo: GitInfo = {
+            isGitRepo: false
+        };
+
+        try {
+            // Check if .git directory exists
+            const gitDir = path.join(workspacePath, '.git');
+            if (!fs.existsSync(gitDir)) {
+                return gitInfo;
+            }
+
+            gitInfo.isGitRepo = true;
+
+            // Get current branch
+            try {
+                const { stdout: branchOutput } = await execAsync('git branch --show-current', { cwd: workspacePath });
+                gitInfo.branch = branchOutput.trim();
+            } catch (error) {
+                console.log('Could not get git branch:', error);
+            }
+
+            // Check for uncommitted changes
+            try {
+                const { stdout: statusOutput } = await execAsync('git status --porcelain', { cwd: workspacePath });
+                gitInfo.hasChanges = statusOutput.trim().length > 0;
+            } catch (error) {
+                console.log('Could not get git status:', error);
+            }
+
+            // Get remote URL
+            try {
+                const { stdout: remoteOutput } = await execAsync('git remote get-url origin', { cwd: workspacePath });
+                gitInfo.remoteUrl = remoteOutput.trim();
+            } catch (error) {
+                console.log('Could not get remote URL:', error);
+            }
+
+            // Get last commit info
+            try {
+                const { stdout: commitOutput } = await execAsync('git log -1 --pretty=format:"%h %s"', { cwd: workspacePath });
+                gitInfo.lastCommit = commitOutput.trim();
+            } catch (error) {
+                console.log('Could not get last commit:', error);
+            }
+
+            // Get ahead/behind info
+            try {
+                const { stdout: aheadBehindOutput } = await execAsync('git rev-list --left-right --count HEAD...@{u}', { cwd: workspacePath });
+                const [ahead, behind] = aheadBehindOutput.trim().split('\t').map(Number);
+                gitInfo.ahead = ahead;
+                gitInfo.behind = behind;
+            } catch (error) {
+                console.log('Could not get ahead/behind info:', error);
+            }
+
+        } catch (error) {
+            console.error('Error getting git info:', error);
+        }
+
+        return gitInfo;
     }
 }

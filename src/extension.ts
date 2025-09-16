@@ -29,14 +29,20 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
                 )];
             }
 
-            return this.instances.map(instance => 
-                new VSCodeInstanceTreeItem(
+            return this.instances.map(instance => {
+                const treeItem = new VSCodeInstanceTreeItem(
                     instance.name,
                     vscode.TreeItemCollapsibleState.Collapsed,
                     'vscodeInstance',
-                    instance
-                )
-            );
+                    instance,
+                    {
+                        command: 'bot-boss.focusInstance',
+                        title: 'Focus Window',
+                        arguments: [{ instance }]
+                    }
+                );
+                return treeItem;
+            });
         } else if (element.instance) {
             // Show instance details
             const instance = element.instance;
@@ -47,6 +53,61 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
                     `📁 ${instance.workspacePath}`,
                     vscode.TreeItemCollapsibleState.None,
                     'workspace'
+                ));
+            }
+
+            // Git information section
+            if (instance.gitInfo?.isGitRepo) {
+                if (instance.gitInfo.branch) {
+                    let gitLabel = `🌿 Branch: ${instance.gitInfo.branch}`;
+                    if (instance.gitInfo.hasChanges) {
+                        gitLabel += ' (uncommitted changes)';
+                    }
+                    details.push(new VSCodeInstanceTreeItem(
+                        gitLabel,
+                        vscode.TreeItemCollapsibleState.None,
+                        'git-branch'
+                    ));
+                }
+
+                if (instance.gitInfo.ahead || instance.gitInfo.behind) {
+                    let syncLabel = '🔄 ';
+                    if (instance.gitInfo.ahead && instance.gitInfo.ahead > 0) {
+                        syncLabel += `↑${instance.gitInfo.ahead} ahead`;
+                    }
+                    if (instance.gitInfo.behind && instance.gitInfo.behind > 0) {
+                        if (instance.gitInfo.ahead && instance.gitInfo.ahead > 0) {
+                            syncLabel += ', ';
+                        }
+                        syncLabel += `↓${instance.gitInfo.behind} behind`;
+                    }
+                    details.push(new VSCodeInstanceTreeItem(
+                        syncLabel,
+                        vscode.TreeItemCollapsibleState.None,
+                        'git-sync'
+                    ));
+                }
+
+                if (instance.gitInfo.lastCommit) {
+                    details.push(new VSCodeInstanceTreeItem(
+                        `📝 ${instance.gitInfo.lastCommit}`,
+                        vscode.TreeItemCollapsibleState.None,
+                        'git-commit'
+                    ));
+                }
+
+                if (instance.gitInfo.remoteUrl) {
+                    details.push(new VSCodeInstanceTreeItem(
+                        `🌐 ${this.formatRemoteUrl(instance.gitInfo.remoteUrl)}`,
+                        vscode.TreeItemCollapsibleState.None,
+                        'git-remote'
+                    ));
+                }
+            } else if (instance.workspacePath) {
+                details.push(new VSCodeInstanceTreeItem(
+                    '📄 Not a git repository',
+                    vscode.TreeItemCollapsibleState.None,
+                    'no-git'
                 ));
             }
 
@@ -97,6 +158,16 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
     getInstanceByPid(pid: number): VSCodeInstance | undefined {
         return this.instances.find(instance => instance.pid === pid);
     }
+
+    private formatRemoteUrl(url: string): string {
+        // Convert SSH URLs to HTTPS for better readability
+        if (url.startsWith('git@')) {
+            // git@github.com:user/repo.git -> github.com/user/repo
+            return url.replace('git@', '').replace(':', '/').replace('.git', '');
+        }
+        // https://github.com/user/repo.git -> github.com/user/repo
+        return url.replace('https://', '').replace('.git', '');
+    }
 }
 
 class VSCodeInstanceTreeItem extends vscode.TreeItem {
@@ -104,18 +175,42 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
         public readonly label: string,
         public readonly collapsibleState: vscode.TreeItemCollapsibleState,
         public readonly contextValue: string,
-        public readonly instance?: VSCodeInstance
+        public readonly instance?: VSCodeInstance,
+        command?: vscode.Command
     ) {
         super(label, collapsibleState);
         
         this.tooltip = this.createTooltip();
         this.iconPath = this.getIcon();
+        this.command = command;
         
         if (instance && contextValue === 'vscodeInstance') {
-            this.description = instance.workspacePath ? 
-                `${instance.workspacePath} (${instance.memory}MB)` : 
-                `PID: ${instance.pid} (${instance.memory}MB)`;
+            this.description = this.createDescription();
         }
+    }
+
+    private createDescription(): string {
+        if (!this.instance) return '';
+        
+        let desc = `${this.instance.memory}MB`;
+        
+        if (this.instance.gitInfo?.isGitRepo && this.instance.gitInfo.branch) {
+            desc += ` • ${this.instance.gitInfo.branch}`;
+            
+            if (this.instance.gitInfo.hasChanges) {
+                desc += ' (*)';
+            }
+            
+            if (this.instance.gitInfo.ahead && this.instance.gitInfo.ahead > 0) {
+                desc += ` ↑${this.instance.gitInfo.ahead}`;
+            }
+            
+            if (this.instance.gitInfo.behind && this.instance.gitInfo.behind > 0) {
+                desc += ` ↓${this.instance.gitInfo.behind}`;
+            }
+        }
+        
+        return desc;
     }
 
     private createTooltip(): string {
@@ -147,6 +242,16 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
                 return new vscode.ThemeIcon('window');
             case 'workspace':
                 return new vscode.ThemeIcon('folder');
+            case 'git-branch':
+                return new vscode.ThemeIcon('git-branch');
+            case 'git-sync':
+                return new vscode.ThemeIcon('sync');
+            case 'git-commit':
+                return new vscode.ThemeIcon('git-commit');
+            case 'git-remote':
+                return new vscode.ThemeIcon('globe');
+            case 'no-git':
+                return new vscode.ThemeIcon('file');
             case 'detail':
                 return new vscode.ThemeIcon('info');
             case 'message':
@@ -171,10 +276,20 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     // Register focus instance command
-    let focusCommand = vscode.commands.registerCommand('bot-boss.focusInstance', async (item: VSCodeInstanceTreeItem) => {
-        if (item.instance) {
+    let focusCommand = vscode.commands.registerCommand('bot-boss.focusInstance', async (item: any) => {
+        let instance: VSCodeInstance | undefined;
+        
+        if (item && item.instance) {
+            // Called from tree item
+            instance = item.instance;
+        } else if (item && typeof item === 'object' && item.pid) {
+            // Called directly with instance
+            instance = item;
+        }
+        
+        if (instance) {
             const instanceService = VSCodeInstanceService.getInstance();
-            await instanceService.focusInstance(item.instance.pid);
+            await instanceService.focusInstance(instance.pid);
         }
     });
 
@@ -197,6 +312,38 @@ export function activate(context: vscode.ExtensionContext) {
             if (instance.cpu > 0) {
                 info += `CPU Usage: ${instance.cpu.toFixed(1)}%\n`;
             }
+
+            // Git information
+            if (instance.gitInfo?.isGitRepo) {
+                info += `\n--- Git Information ---\n`;
+                if (instance.gitInfo.branch) {
+                    info += `Branch: ${instance.gitInfo.branch}\n`;
+                }
+                if (instance.gitInfo.hasChanges) {
+                    info += `Status: Uncommitted changes\n`;
+                } else {
+                    info += `Status: Clean working tree\n`;
+                }
+                if (instance.gitInfo.lastCommit) {
+                    info += `Last Commit: ${instance.gitInfo.lastCommit}\n`;
+                }
+                if (instance.gitInfo.remoteUrl) {
+                    info += `Remote: ${instance.gitInfo.remoteUrl}\n`;
+                }
+                if (instance.gitInfo.ahead || instance.gitInfo.behind) {
+                    info += `Sync: `;
+                    if (instance.gitInfo.ahead && instance.gitInfo.ahead > 0) {
+                        info += `${instance.gitInfo.ahead} commits ahead`;
+                    }
+                    if (instance.gitInfo.behind && instance.gitInfo.behind > 0) {
+                        if (instance.gitInfo.ahead && instance.gitInfo.ahead > 0) {
+                            info += ', ';
+                        }
+                        info += `${instance.gitInfo.behind} commits behind`;
+                    }
+                    info += `\n`;
+                }
+            }
             
             if (instance.arguments.length > 0) {
                 info += `\nCommand Line Arguments:\n`;
@@ -214,6 +361,13 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // Register debug command to manually test detection
+    let debugCommand = vscode.commands.registerCommand('bot-boss.debugDetection', async () => {
+        const instanceService = VSCodeInstanceService.getInstance();
+        const instances = await instanceService.getVSCodeInstances();
+        vscode.window.showInformationMessage(`Debug: Found ${instances.length} VS Code instances. Check Debug Console for details.`);
+    });
+
     // Auto-refresh every 30 seconds
     const autoRefreshInterval = setInterval(async () => {
         await provider.refreshInstances();
@@ -222,6 +376,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(refreshCommand);
     context.subscriptions.push(focusCommand);
     context.subscriptions.push(workspaceInfoCommand);
+    context.subscriptions.push(debugCommand);
     context.subscriptions.push({
         dispose: () => clearInterval(autoRefreshInterval)
     });

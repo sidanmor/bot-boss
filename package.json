@@ -29,6 +29,10 @@
             {
                 "command": "bot-boss.openWorkspaceInfo",
                 "title": "Show Workspace Info"
+            },
+            {
+                "command": "bot-boss.debugDetection",
+                "title": "Debug Instance Detection"
             }
         ],
         "viewsContainers": {
@@ -53,6 +57,11 @@
             "view/title": [
                 {
                     "command": "bot-boss.refreshInstances",
+                    "when": "view == vscodeInstancesExplorer",
+                    "group": "navigation"
+                },
+                {
+                    "command": "bot-boss.debugDetection",
                     "when": "view == vscodeInstancesExplorer",
                     "group": "navigation"
                 }
