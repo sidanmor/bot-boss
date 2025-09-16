@@ -197,6 +197,7 @@ export class SharedInstanceManager {
 
             if (!copilotExtension) {
                 copilotInfo.status = 'Disabled';
+                copilotInfo.detailHint = 'GitHub Copilot extension not installed';
                 return copilotInfo;
             }
 
@@ -205,25 +206,42 @@ export class SharedInstanceManager {
 
             if (!copilotExtension.isActive) {
                 copilotInfo.status = 'Disabled';
+                copilotInfo.detailHint = 'Extension installed but inactive';
                 return copilotInfo;
             }
 
             copilotInfo.isActive = true;
 
-            // Simple status detection - assume running if active
-            copilotInfo.status = 'Running';
-            
-            // Try basic API check
             try {
                 const copilotApi = copilotExtension.exports;
-                if (copilotApi && typeof copilotApi.getStatus === 'function') {
-                    const status = await copilotApi.getStatus();
-                    if (status) {
-                        copilotInfo.status = this.mapCopilotStatus(status);
+                if (copilotApi) {
+                    let rawStatus: any | undefined;
+                    try {
+                        if (typeof copilotApi.getStatus === 'function') {
+                            rawStatus = await copilotApi.getStatus();
+                        } else if (typeof copilotApi.status !== 'undefined') {
+                            rawStatus = copilotApi.status;
+                        } else if (copilotApi.state) {
+                            rawStatus = copilotApi.state;
+                        }
+                    } catch {}
+                    copilotInfo.status = this.mapCopilotStatus(rawStatus);
+                    if (copilotApi.isGenerating || copilotApi.generating) {
+                        if (copilotApi.isGenerating === true || copilotApi.generating === true) {
+                            copilotInfo.status = 'Generating';
+                            copilotInfo.detailHint = 'Copilot is generating suggestions';
+                        }
                     }
+                } else {
+                    copilotInfo.status = 'Idle';
                 }
-            } catch (apiError) {
-                // Keep default 'Running' status
+            } catch {
+                copilotInfo.status = 'Idle';
+            }
+
+            if (copilotInfo.status === 'Unknown' && copilotInfo.isActive) {
+                copilotInfo.status = 'Idle';
+                copilotInfo.detailHint = 'Active but no explicit status; assuming Idle';
             }
 
             copilotInfo.lastActivity = new Date().toISOString();
@@ -241,23 +259,50 @@ export class SharedInstanceManager {
      * Map Copilot status values (simplified version)
      */
     private mapCopilotStatus(status: any): CopilotInfo['status'] {
-        if (typeof status === 'string') {
-            const statusLower = status.toLowerCase();
-            
-            if (statusLower.includes('running') || statusLower.includes('active') || statusLower.includes('ready')) {
-                return 'Running';
-            } else if (statusLower.includes('waiting') || statusLower.includes('pending') || statusLower.includes('approval')) {
-                return 'Waiting for Approval';
-            } else if (statusLower.includes('failed') || statusLower.includes('error')) {
-                return 'Failed';
-            } else if (statusLower.includes('done') || statusLower.includes('completed')) {
-                return 'Done';
-            } else if (statusLower.includes('disabled')) {
-                return 'Disabled';
+        if (!status) return 'Unknown';
+        const classify = (raw: string): CopilotInfo['status'] => {
+            const s = raw.toLowerCase();
+            if (/(sign.?in|required login|sign in)/.test(s)) return 'SigninRequired';
+            if (/unauthori|forbidden|401|403/.test(s)) return 'Unauthorized';
+            if (/rate.?limit|429/.test(s)) return 'RateLimited';
+            if (/(approval|policy|waiting|pending review)/.test(s)) return 'Waiting for Approval';
+            if (/(initializing|starting|loading|activating)/.test(s)) return 'Initializing';
+            if (/(generating|computing|producing|inference|working)/.test(s)) return 'Generating';
+            if (/(failed|failure)/.test(s)) return 'Failed';
+            if (/(error|exception)/.test(s)) return 'Error';
+            if (/(completed|done|success)/.test(s)) return 'Done';
+            if (/(disabled|inactive|turned off)/.test(s)) return 'Disabled';
+            if (/(idle|ready|running|active)/.test(s)) return 'Idle';
+            return 'Unknown';
+        };
+        const visited = new Set<any>();
+        const stack: any[] = [status];
+        const MAX_NODES = 50;
+        let processed = 0;
+        while (stack.length && processed < MAX_NODES) {
+            const cur = stack.pop();
+            processed++;
+            if (cur == null) continue;
+            if (visited.has(cur)) continue;
+            if (typeof cur === 'string') {
+                const mapped = classify(cur);
+                if (mapped !== 'Unknown') return mapped;
+            } else if (typeof cur === 'object') {
+                visited.add(cur);
+                const direct = (cur.status || cur.state || cur.phase || cur.mode);
+                if (typeof direct === 'string') {
+                    const mapped = classify(direct);
+                    if (mapped !== 'Unknown') return mapped;
+                }
+                for (const key of Object.keys(cur)) {
+                    const val = (cur as any)[key];
+                    if (typeof val === 'string' || (typeof val === 'object' && val !== null)) {
+                        stack.push(val);
+                    }
+                }
             }
         }
-
-        return 'Running'; // Default for active extension
+        return 'Unknown';
     }
 
     /**

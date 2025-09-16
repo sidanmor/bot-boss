@@ -269,35 +269,37 @@ class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTr
 
     private getCopilotStatusIcon(status: string): string {
         switch (status) {
-            case 'Running':
-                return '🟢';
-            case 'Waiting for Approval':
-                return '🟡';
-            case 'Failed':
-                return '🔴';
-            case 'Done':
-                return '✅';
-            case 'Disabled':
-                return '⚫';
-            default:
-                return '❓';
+            case 'Initializing': return '🟤';
+            case 'Idle': return '🟢';
+            case 'Running': return '🟢';
+            case 'Generating': return '⚙️';
+            case 'Waiting for Approval': return '🟡';
+            case 'SigninRequired': return '🔐';
+            case 'Unauthorized': return '🚫';
+            case 'RateLimited': return '⏳';
+            case 'Failed': return '🔴';
+            case 'Error': return '🛑';
+            case 'Done': return '✅';
+            case 'Disabled': return '⚫';
+            default: return '❓';
         }
     }
 
     private getCopilotStatusColor(status: string): string {
         switch (status) {
-            case 'Running':
-                return 'green';
-            case 'Waiting for Approval':
-                return 'yellow';
-            case 'Failed':
-                return 'red';
-            case 'Done':
-                return 'blue';
-            case 'Disabled':
-                return 'gray';
-            default:
-                return 'gray';
+            case 'Initializing': return 'brown';
+            case 'Idle': return 'green';
+            case 'Running': return 'green';
+            case 'Generating': return 'blue';
+            case 'Waiting for Approval': return 'yellow';
+            case 'SigninRequired': return 'orange';
+            case 'Unauthorized': return 'orange';
+            case 'RateLimited': return 'magenta';
+            case 'Failed': return 'red';
+            case 'Error': return 'red';
+            case 'Done': return 'cyan';
+            case 'Disabled': return 'gray';
+            default: return 'gray';
         }
     }
 }
@@ -363,18 +365,19 @@ class VSCodeInstanceTreeItem extends vscode.TreeItem {
 
     private getCopilotStatusIcon(status: string): string {
         switch (status) {
-            case 'Running':
-                return '🟢';
-            case 'Waiting for Approval':
-                return '🟡';
-            case 'Failed':
-                return '🔴';
-            case 'Done':
-                return '✅';
-            case 'Disabled':
-                return '⚫';
-            default:
-                return '❓';
+            case 'Initializing': return '🟤';
+            case 'Idle': return '🟢';
+            case 'Running': return '🟢';
+            case 'Generating': return '⚙️';
+            case 'Waiting for Approval': return '🟡';
+            case 'SigninRequired': return '🔐';
+            case 'Unauthorized': return '🚫';
+            case 'RateLimited': return '⏳';
+            case 'Failed': return '🔴';
+            case 'Error': return '🛑';
+            case 'Done': return '✅';
+            case 'Disabled': return '⚫';
+            default: return '❓';
         }
     }
 
@@ -623,6 +626,28 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage(`Debug: Found ${instances.length} VS Code instances. Check Debug Console for details.`);
     });
 
+    // Register raw Copilot debug command
+    const rawCopilotCommand = vscode.commands.registerCommand('bot-boss.debugCopilotRaw', async () => {
+        const instanceService = VSCodeInstanceService.getInstance();
+        // Force refresh just this window's Copilot info
+        const copilotInfo = await instanceService.getCopilotInfo();
+        const lines: string[] = [];
+        lines.push('Raw Copilot Detection Report');
+        lines.push(`Generated: ${new Date().toLocaleString()}`);
+        lines.push('');
+        lines.push(`Installed: ${copilotInfo.isInstalled}`);
+        lines.push(`Active: ${copilotInfo.isActive}`);
+        lines.push(`Version: ${copilotInfo.version || 'N/A'}`);
+        lines.push(`Mapped Status: ${copilotInfo.status}`);
+        if (copilotInfo.detailHint) lines.push(`Detail Hint: ${copilotInfo.detailHint}`);
+        if (copilotInfo.error) lines.push(`Error: ${copilotInfo.error}`);
+        if (copilotInfo.lastActivity) lines.push(`Last Activity: ${copilotInfo.lastActivity}`);
+        lines.push('');
+        lines.push('Enable verbose logging by setting env var BOT_BOSS_DEBUG=1 before starting VS Code.');
+        const doc = await vscode.workspace.openTextDocument({ content: lines.join('\n'), language: 'markdown' });
+        await vscode.window.showTextDocument(doc, { preview: true });
+    });
+
     // Register force registration command for testing
     let forceRegisterCommand = vscode.commands.registerCommand('bot-boss.forceRegister', async () => {
         const sharedManager = SharedInstanceManager.getInstance();
@@ -671,8 +696,54 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(focusCommand);
     context.subscriptions.push(workspaceInfoCommand);
     context.subscriptions.push(debugCommand);
+    context.subscriptions.push(rawCopilotCommand);
     context.subscriptions.push(forceRegisterCommand);
     context.subscriptions.push(statusCommand);
+    
+    // Command: Show aggregated Copilot status across instances
+    const copilotStatusCommand = vscode.commands.registerCommand('bot-boss.showCopilotStatus', async () => {
+        await provider.refreshInstances();
+        const instances = (provider as any).instances as VSCodeInstance[]; // access private for reporting
+        const lines: string[] = [];
+        lines.push('GitHub Copilot Status Summary');
+        lines.push(`Generated: ${new Date().toLocaleString()}`);
+        lines.push('');
+        if (!instances || instances.length === 0) {
+            lines.push('No instances detected.');
+        } else {
+            for (const inst of instances) {
+                const c = inst.copilotInfo;
+                if (!c) {
+                    lines.push(`${inst.name}: ❓ Unknown (no data)`);
+                    continue;
+                }
+                const iconMap: Record<string,string> = {
+                    Initializing:'🟤', Idle:'🟢', Running:'🟢', Generating:'⚙️', 'Waiting for Approval':'🟡', SigninRequired:'🔐', Unauthorized:'🚫', RateLimited:'⏳', Failed:'🔴', Error:'🛑', Done:'✅', Disabled:'⚫', Unknown:'❓'
+                };
+                const icon = iconMap[c.status] || '❓';
+                let line = `${inst.name}: ${icon} ${c.status}`;
+                if (c.version) line += ` (v${c.version})`;
+                if (c.detailHint) line += ` - ${c.detailHint}`;
+                lines.push(line);
+            }
+        }
+        lines.push('\nStatus Meanings:');
+        lines.push('🟤 Initializing: Starting services (wait)');
+        lines.push('🟢 Idle/Running: Ready for suggestions');
+        lines.push('⚙️ Generating: Working on a completion');
+        lines.push('🟡 Waiting for Approval: Needs policy/admin approval');
+        lines.push('🔐 SigninRequired: Sign in to GitHub to enable Copilot');
+        lines.push('🚫 Unauthorized: Auth failed / insufficient rights (re-auth)');
+        lines.push('⏳ RateLimited: Too many requests (pause)');
+        lines.push('🔴 Failed / 🛑 Error: Fault state – check logs / reload');
+        lines.push('✅ Done: Last task completed');
+        lines.push('⚫ Disabled: Extension inactive or not installed');
+        lines.push('❓ Unknown: State not determined');
+
+        const doc = await vscode.workspace.openTextDocument({content: lines.join('\n'), language: 'markdown'});
+        await vscode.window.showTextDocument(doc, { preview: true });
+    });
+    context.subscriptions.push(copilotStatusCommand);
     context.subscriptions.push({
         dispose: () => clearInterval(autoRefreshInterval)
     });

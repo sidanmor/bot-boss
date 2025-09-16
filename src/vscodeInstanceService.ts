@@ -21,10 +21,27 @@ export interface GitInfo {
 export interface CopilotInfo {
     isInstalled: boolean;
     isActive: boolean;
-    status: 'Running' | 'Waiting for Approval' | 'Failed' | 'Done' | 'Disabled' | 'Unknown';
+    /**
+     * Expanded status set to communicate user action needs.
+     * Legend / Guidance:
+     *  - Initializing: Starting up / loading models (wait)
+     *  - Idle: Ready but not currently generating (no action)
+     *  - Generating: Producing a suggestion/completion (wait)
+     *  - Waiting for Approval: Needs policy / org approval (review admin / policy settings)
+     *  - SigninRequired: User must sign in (run Copilot sign-in command)
+     *  - Unauthorized: Auth failed or insufficient permissions (re-auth required)
+     *  - RateLimited: Too many requests (pause usage briefly)
+     *  - Failed / Error: Fault condition (check logs / reload window)
+     *  - Disabled: Extension installed but inactive / globally disabled
+     *  - Done: Recently completed a generation task
+     *  - Running: Generic active state (legacy fallback)
+     *  - Unknown: Could not determine current state
+     */
+    status: 'Initializing' | 'Idle' | 'Generating' | 'Waiting for Approval' | 'SigninRequired' | 'Unauthorized' | 'RateLimited' | 'Failed' | 'Error' | 'Disabled' | 'Done' | 'Running' | 'Unknown';
     lastActivity?: string;
     version?: string;
     error?: string;
+    detailHint?: string; // Optional human-readable hint / action
 }
 
 export interface VSCodeInstance {
@@ -1033,14 +1050,29 @@ export class VSCodeInstanceService {
 
             if (!copilotExtension) {
                 copilotInfo.status = 'Disabled';
+                copilotInfo.detailHint = 'GitHub Copilot extension not installed';
                 return copilotInfo;
             }
 
             copilotInfo.isInstalled = true;
             copilotInfo.version = copilotExtension.packageJSON?.version;
 
+            const debug = process.env.BOT_BOSS_DEBUG || process.env.DEBUG;
+            const log = (...args: any[]) => { if (debug) console.log('[BotBoss][CopilotDetect]', ...args); };
+
+            if (!copilotExtension.isActive) {
+                log('Copilot extension installed but not active. Attempting activation...');
+                try {
+                    await copilotExtension.activate();
+                    log('Activation attempted, isActive=', copilotExtension.isActive);
+                } catch (actErr) {
+                    log('Activation error:', actErr);
+                }
+            }
+
             if (!copilotExtension.isActive) {
                 copilotInfo.status = 'Disabled';
+                copilotInfo.detailHint = 'Extension installed but inactive (maybe disabled per workspace)';
                 return copilotInfo;
             }
 
@@ -1049,33 +1081,54 @@ export class VSCodeInstanceService {
             // Try to get status from the extension's exports/API
             try {
                 const copilotApi = copilotExtension.exports;
+                log('Exports keys:', copilotApi ? Object.keys(copilotApi).slice(0, 25) : 'none');
                 
                 if (copilotApi) {
-                    // Check for common status indicators
-                    if (typeof copilotApi.getStatus === 'function') {
-                        const status = await copilotApi.getStatus();
-                        copilotInfo.status = this.mapCopilotStatus(status);
-                    } else if (typeof copilotApi.status === 'string') {
-                        copilotInfo.status = this.mapCopilotStatus(copilotApi.status);
-                    } else if (copilotApi.state) {
-                        copilotInfo.status = this.mapCopilotStatus(copilotApi.state);
-                    } else {
-                        // Default to Running if extension is active but no specific status
-                        copilotInfo.status = 'Running';
+                    let rawStatus: any | undefined;
+                    try {
+                        if (typeof copilotApi.getStatus === 'function') {
+                            rawStatus = await copilotApi.getStatus();
+                            log('getStatus() returned:', rawStatus);
+                        } else if (typeof copilotApi.status !== 'undefined') {
+                            rawStatus = copilotApi.status;
+                            log('Using exports.status:', rawStatus);
+                        } else if (copilotApi.state) {
+                            rawStatus = copilotApi.state;
+                            log('Using exports.state:', rawStatus);
+                        }
+                    } catch (inner) {
+                        log('Inner status retrieval error:', inner);
+                    }
+                    copilotInfo.status = this.mapCopilotStatus(rawStatus);
+                    log('Mapped status after primary extraction:', copilotInfo.status);
+
+                    // Heuristic: if API exposes an isGenerating flag
+                    if (copilotApi.isGenerating || copilotApi.generating) {
+                        if (copilotApi.isGenerating === true || copilotApi.generating === true) {
+                            copilotInfo.status = 'Generating';
+                            copilotInfo.detailHint = 'Copilot is currently producing output';
+                            log('Overriding status to Generating due to isGenerating flag');
+                        }
                     }
 
-                    // Try to get last activity
                     if (copilotApi.lastActivity) {
                         copilotInfo.lastActivity = copilotApi.lastActivity;
                     }
                 } else {
-                    // Extension is active but no API exports - assume running
-                    copilotInfo.status = 'Running';
+                    copilotInfo.status = 'Idle';
+                    log('No exports API, defaulting to Idle');
                 }
             } catch (apiError) {
-                console.log('Could not access Copilot API:', apiError);
-                // Extension is active but API call failed - likely still running
-                copilotInfo.status = 'Running';
+                log('Could not access Copilot API:', apiError);
+                // Extension is active but API call failed - treat as Idle unless error message suggests otherwise
+                copilotInfo.status = 'Idle';
+            }
+
+            // Fallback: if still Unknown but extension is active, treat as Idle so user sees usable state
+            if (copilotInfo.status === 'Unknown' && copilotInfo.isActive) {
+                copilotInfo.status = 'Idle';
+                copilotInfo.detailHint = 'Active but no explicit status exposed; treating as Idle';
+                log('Fallback applied: Unknown -> Idle');
             }
 
             // Additional status checks using VS Code commands (fallback method)
@@ -1090,24 +1143,35 @@ export class VSCodeInstanceService {
                         try {
                             const status = await vscode.commands.executeCommand('github.copilot.status');
                             if (status) {
-                                copilotInfo.status = this.mapCopilotStatus(status);
+                                const mapped = this.mapCopilotStatus(status);
+                                // Only overwrite if mapped provides more actionable state than existing
+                                if (copilotInfo.status === 'Idle' || copilotInfo.status === 'Running' || copilotInfo.status === 'Unknown') {
+                                    copilotInfo.status = mapped;
+                                }
                             }
                         } catch (cmdError) {
                             console.log('Could not execute copilot status command:', cmdError);
                         }
+                    }
+
+                    // If sign-in command exists & status suggests auth problem
+                    const signInCmd = commands.find(c => c.includes('copilot') && c.toLowerCase().includes('sign') && c.toLowerCase().includes('in'));
+                    if (signInCmd && (copilotInfo.status === 'Unauthorized' || copilotInfo.status === 'SigninRequired')) {
+                        copilotInfo.detailHint = 'Run Copilot sign-in command to authenticate';
                     }
                     
                     // Update last activity to current time if commands are available
                     copilotInfo.lastActivity = new Date().toISOString();
                 }
             } catch (commandError) {
-                console.log('Could not check Copilot commands:', commandError);
+                log('Could not check Copilot commands:', commandError);
             }
 
         } catch (error) {
             console.error('Error getting Copilot info:', error);
             copilotInfo.error = error instanceof Error ? error.message : String(error);
-            copilotInfo.status = 'Failed';
+            copilotInfo.status = 'Error';
+            copilotInfo.detailHint = 'Unexpected error while querying Copilot';
         }
 
         return copilotInfo;
@@ -1117,27 +1181,54 @@ export class VSCodeInstanceService {
      * Map various Copilot status values to our standard status types
      */
     private mapCopilotStatus(status: any): CopilotInfo['status'] {
-        if (typeof status === 'string') {
-            const statusLower = status.toLowerCase();
-            
-            if (statusLower.includes('running') || statusLower.includes('active') || statusLower.includes('ready')) {
-                return 'Running';
-            } else if (statusLower.includes('waiting') || statusLower.includes('pending') || statusLower.includes('approval')) {
-                return 'Waiting for Approval';
-            } else if (statusLower.includes('failed') || statusLower.includes('error')) {
-                return 'Failed';
-            } else if (statusLower.includes('done') || statusLower.includes('completed') || statusLower.includes('success')) {
-                return 'Done';
-            } else if (statusLower.includes('disabled') || statusLower.includes('inactive')) {
-                return 'Disabled';
-            }
-        } else if (typeof status === 'object' && status !== null) {
-            // Handle object status
-            if (status.state || status.status) {
-                return this.mapCopilotStatus(status.state || status.status);
+        if (!status) return 'Unknown';
+
+        const classify = (raw: string): CopilotInfo['status'] => {
+            const s = raw.toLowerCase();
+            if (/(sign.?in|required login|sign in)/.test(s)) return 'SigninRequired';
+            if (/unauthori|forbidden|401|403/.test(s)) return 'Unauthorized';
+            if (/rate.?limit|429/.test(s)) return 'RateLimited';
+            if (/(approval|policy|waiting|pending review)/.test(s)) return 'Waiting for Approval';
+            if (/(initializing|starting|loading|activating)/.test(s)) return 'Initializing';
+            if (/(generating|computing|producing|inference|working)/.test(s)) return 'Generating';
+            if (/(failed|failure)/.test(s)) return 'Failed';
+            if (/(error|exception)/.test(s)) return 'Error';
+            if (/(completed|done|success)/.test(s)) return 'Done';
+            if (/(disabled|inactive|turned off)/.test(s)) return 'Disabled';
+            if (/(idle|ready|running|active)/.test(s)) return 'Idle';
+            return 'Unknown';
+        };
+
+        // Collect candidate strings via deep traversal (limited depth & size to avoid cycles)
+        const visited = new Set<any>();
+        const stack: any[] = [status];
+        const MAX_NODES = 50; // safety cap
+        let nodesProcessed = 0;
+        while (stack.length && nodesProcessed < MAX_NODES) {
+            const current = stack.pop();
+            nodesProcessed++;
+            if (current == null) continue;
+            if (visited.has(current)) continue;
+            if (typeof current === 'string') {
+                const mapped = classify(current);
+                if (mapped !== 'Unknown') return mapped;
+            } else if (typeof current === 'object') {
+                visited.add(current);
+                // If object has a direct 'status' or 'state' string, prioritize
+                const direct = (current.status || current.state || current.phase || current.mode);
+                if (typeof direct === 'string') {
+                    const mapped = classify(direct);
+                    if (mapped !== 'Unknown') return mapped;
+                }
+                // Push nested values
+                for (const key of Object.keys(current)) {
+                    const val = (current as any)[key];
+                    if (typeof val === 'string' || (typeof val === 'object' && val !== null)) {
+                        stack.push(val);
+                    }
+                }
             }
         }
-
         return 'Unknown';
     }
 }
