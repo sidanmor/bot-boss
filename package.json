@@ -13,13 +13,23 @@
         "type": "git",
         "url": "https://github.com/sidanmor/bot-boss.git"
     },
-    "activationEvents": [],
+    "activationEvents": [
+        "onStartupFinished",
+        "onCommand:bot-boss.showCopilotStatus",
+        "onCommand:bot-boss.showCopilotHistory",
+        "onCommand:bot-boss.showAggregatedCopilotStatus"
+    ],
     "main": "./out/extension.js",
     "contributes": {
         "commands": [
             {
                 "command": "bot-boss.refreshInstances",
                 "title": "Refresh VS Code Instances",
+                "icon": "$(refresh)"
+            },
+            {
+                "command": "bot-boss.refreshCopilotView",
+                "title": "Refresh Copilot View",
                 "icon": "$(refresh)"
             },
             {
@@ -48,8 +58,111 @@
                 "command": "bot-boss.openInEditor",
                 "title": "Open in Editor",
                 "icon": "$(open-preview)"
+            },
+            {
+                "command": "bot-boss.showCopilotStatus",
+                "title": "Show Copilot Status (Current Window)",
+                "icon": "$(github)"
+            },
+            {
+                "command": "bot-boss.debugCopilotRaw",
+                "title": "Debug Copilot Raw Status"
+            },
+            {
+                "command": "bot-boss.showCopilotHistory",
+                "title": "Show Copilot Status History",
+                "icon": "$(history)"
+            },
+            {
+                "command": "bot-boss.showAggregatedCopilotStatus",
+                "title": "Show Aggregated Copilot Status",
+                "icon": "$(graph)"
+            },
+            {
+                "command": "bot-boss.tryCopilotSignin",
+                "title": "Try Copilot Sign-In",
+                "icon": "$(account)"
+            },
+            {
+                "command": "bot-boss.testCopilotActivity",
+                "title": "Test Copilot Activity Detection",
+                "icon": "$(beaker)"
+            },
+            {
+                "command": "bot-boss.debugCopilotChat",
+                "title": "Debug Copilot Chat Monitoring",
+                "icon": "$(comment-discussion)"
+            },
+            {
+                "command": "bot-boss.showDebugInfo",
+                "title": "Show Debug Information",
+                "icon": "$(info)"
+            },
+            {
+                "command": "bot-boss.enableDebugMode",
+                "title": "Enable Debug Mode",
+                "icon": "$(debug-alt)"
+            },
+            {
+                "command": "bot-boss.clearDebugLog",
+                "title": "Clear Debug Log",
+                "icon": "$(clear-all)"
+            },
+            {
+                "command": "bot-boss.debugExtensionHost",
+                "title": "Debug Extension Host Info",
+                "icon": "$(debug)"
+            },
+            {
+                "command": "bot-boss.testAllFeatures",
+                "title": "Test All Features",
+                "icon": "$(test-view-icon)"
             }
         ],
+        "configuration": {
+            "title": "Bot Boss",
+            "properties": {
+                "bot-boss.githubStatus.enable": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable GitHub global service status commands/reporting"
+                },
+                "bot-boss.copilot.history.maxEntries": {
+                    "type": "number",
+                    "default": 50,
+                    "minimum": 10,
+                    "description": "Max Copilot status history entries to retain per window"
+                },
+                "bot-boss.copilot.pollIntervalMs": {
+                    "type": "number",
+                    "default": 3000,
+                    "minimum": 1000,
+                    "description": "Polling interval (ms) for local Copilot status service"
+                },
+                "bot-boss.copilot.aggregateRefreshMs": {
+                    "type": "number",
+                    "default": 15000,
+                    "minimum": 5000,
+                    "description": "Refresh interval (ms) for Copilot aggregate tree view"
+                },
+                "bot-boss.debug.enabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Enable debug logging for Bot Boss extension"
+                },
+                "bot-boss.debug.logLevel": {
+                    "type": "string",
+                    "enum": ["debug", "info", "warn", "error"],
+                    "default": "info",
+                    "description": "Log level for debug output (debug, info, warn, error)"
+                },
+                "bot-boss.debug.showOutput": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically show debug output panel when logging"
+                }
+            }
+        },
         "viewsContainers": {
             "activitybar": [
                 {
@@ -65,6 +178,11 @@
                     "id": "vscodeInstancesExplorer",
                     "name": "VS Code Instances",
                     "when": "true"
+                },
+                {
+                    "id": "copilotInstancesView",
+                    "name": "Copilot Overview",
+                    "when": "true"
                 }
             ]
         },
@@ -73,27 +191,38 @@
                 {
                     "command": "bot-boss.refreshInstances",
                     "when": "view == vscodeInstancesExplorer",
-                    "group": "navigation"
+                    "group": "navigation",
+                    "icon": "$(refresh)"
+                },
+                {
+                    "command": "bot-boss.refreshCopilotView",
+                    "when": "view == copilotInstancesView",
+                    "group": "navigation",
+                    "icon": "$(refresh)"
                 },
                 {
                     "command": "bot-boss.debugDetection",
                     "when": "view == vscodeInstancesExplorer",
-                    "group": "navigation"
+                    "group": "navigation",
+                    "icon": "$(beaker)"
                 },
                 {
                     "command": "bot-boss.forceRegister",
                     "when": "view == vscodeInstancesExplorer",
-                    "group": "navigation"
+                    "group": "navigation",
+                    "icon": "$(add)"
                 },
                 {
                     "command": "bot-boss.showSharedFileStatus",
                     "when": "view == vscodeInstancesExplorer",
-                    "group": "navigation"
+                    "group": "navigation",
+                    "icon": "$(pulse)"
                 },
                 {
                     "command": "bot-boss.openInEditor",
                     "when": "view == vscodeInstancesExplorer",
-                    "group": "navigation"
+                    "group": "navigation",
+                    "icon": "$(open-preview)"
                 }
             ],
             "view/item/context": [

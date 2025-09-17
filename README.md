@@ -14,6 +14,9 @@ A VS Code extension that helps you manage and monitor all your open VS Code inst
 - **Detailed Information**: View workspace details and git information
 - **Auto-refresh**: Automatically updates the list every 30 seconds
 - **Real-time Updates**: Each VS Code instance updates its status every 30 seconds with heartbeat mechanism
+- **Local Copilot Status**: Live GitHub Copilot status (current window) via status bar (no external API)
+- **Copilot Aggregation**: Aggregated multi-window Copilot health indicator in status bar
+*- **Copilot History**: View recent Copilot status transitions per window*
 
 ## How It Works
 
@@ -26,8 +29,9 @@ This extension uses a revolutionary **shared file approach** instead of process 
 5. **Fallback detection** uses process detection only if shared file is empty
 
 ### Shared File Location
+
 - **Windows**: `%TEMP%\vscode-instances.json`
-- **macOS**: `/tmp/vscode-instances.json` 
+- **macOS**: `/tmp/vscode-instances.json`
 - **Linux**: `/tmp/vscode-instances.json`
 
 ## How to Use
@@ -55,7 +59,7 @@ This extension uses a revolutionary **shared file approach** instead of process 
 For each VS Code instance with a git workspace, you'll see:
 
 - **Branch name** in the description (e.g., "main", "feature/new-ui")
-- **Uncommitted changes** indicator (*) 
+- **Uncommitted changes** indicator (*)
 - **Sync status**: ↑2 (ahead), ↓1 (behind) commits
 - **Detailed git info** when expanded:
   - Current branch
@@ -67,7 +71,9 @@ For each VS Code instance with a git workspace, you'll see:
 ## Features in Detail
 
 ### Shared File Instance Detection
+
 The extension's primary method uses a shared file system:
+
 - Each VS Code instance registers itself in a shared JSON file
 - Includes workspace path, git info, memory usage, and session details
 - 30-second heartbeat keeps instance data fresh
@@ -75,27 +81,66 @@ The extension's primary method uses a shared file system:
 - File locking prevents data corruption
 
 ### Fallback Process Detection
+
 If the shared file is empty, falls back to process scanning:
-- Scans for `Code.exe` processes  
+
+- Scans for `Code.exe` processes
 - Extracts workspace info from window titles and command lines
 - Less reliable but works for instances without the extension
 
 ### Git Integration
+
 For each workspace that contains a git repository, the extension shows:
+
 - Current branch name
-- Working tree status (clean/uncommitted changes)  
+- Working tree status (clean/uncommitted changes)
 - Commits ahead/behind upstream
 - Last commit information
 - Remote repository URL
 
 ### Window Management
+
 - **Click to Focus**: Simply click on any instance name to bring that window to front
 - **Context Menu**: Right-click for additional options
 - **Detailed View**: Expand instances to see all available information
 
+### GitHub Copilot Local Status
+
+The extension surfaces the **actual runtime status** of the GitHub Copilot extension in your current VS Code window:
+
+- Status bar indicator (left side) shows Copilot state using icons/spinners
+- Command: `Bot Boss: Show Copilot Status (Current Window)` reveals a detailed breakdown
+- No calls are made to `githubstatus.com`; status is derived from the local `github.copilot` extension exports & commands
+- Detects nuanced states (Initializing, Generating, Waiting for Approval, SigninRequired, RateLimited, Failed, Disabled, etc.)
+- Provides hints for user action (e.g., sign in, re-auth, rate limit backoff)
+
+If the Copilot extension isn't installed or active, you'll see `Disabled` or a question icon.
+
+#### Aggregated Copilot Status
+
+An additional status bar item summarizes the worst Copilot state across all detected instances (using a severity mapping). Clicking it opens a detailed aggregated report with counts per status and per-instance breakdown.
+
+#### Copilot Status History
+
+Use the command palette: `Bot Boss: Show Copilot Status History` to view a reverse chronological list of state transitions for the current window (persisted between sessions, capped by configurable max entries).
+
+#### Configuration
+
+Open Settings and search for "Bot Boss" or add to `settings.json`:
+
+```jsonc
+{
+   // Toggle GitHub global service status features (unrelated to Copilot runtime status)
+   "bot-boss.githubStatus.enable": true,
+
+   // Maximum Copilot status history entries to retain (per window)
+   "bot-boss.copilot.history.maxEntries": 50
+}
+```
+
 ## Example Display
 
-```
+```text
 📁 VS Code - my-project • main (*) ↑2 ↓1         [85MB]
 ├─ 📁 C:\Projects\my-project
 ├─ 🌿 Branch: main (uncommitted changes)
