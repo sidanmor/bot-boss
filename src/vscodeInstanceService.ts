@@ -1034,84 +1034,205 @@ export class VSCodeInstanceService {
         };
 
         try {
-            // GitHub Copilot extension ID
+            // GitHub Copilot extension IDs - check both main and chat extensions
             const copilotExtensionId = 'github.copilot';
+            const copilotChatExtensionId = 'github.copilot-chat';
+            
             const copilotExtension = vscode.extensions.getExtension(copilotExtensionId);
+            const copilotChatExtension = vscode.extensions.getExtension(copilotChatExtensionId);
 
-            if (!copilotExtension) {
+            // Check if either extension is installed
+            if (!copilotExtension && !copilotChatExtension) {
                 copilotInfo.status = 'Disabled';
-                copilotInfo.detailHint = 'GitHub Copilot extension not installed';
+                copilotInfo.detailHint = 'GitHub Copilot extensions not installed';
                 return copilotInfo;
             }
 
+            // Prioritize chat extension if available, fallback to main extension
+            const primaryExtension = copilotChatExtension || copilotExtension;
+            const extensionName = copilotChatExtension ? 'Copilot Chat' : 'Copilot';
+            
             copilotInfo.isInstalled = true;
-            copilotInfo.version = copilotExtension.packageJSON?.version;
+            copilotInfo.version = primaryExtension?.packageJSON?.version;
 
             const debug = process.env.BOT_BOSS_DEBUG || process.env.DEBUG;
-            const log = (...args: any[]) => { if (debug) console.log('[BotBoss][CopilotDetect]', ...args); };
+            const log = (...args: any[]) => { if (debug) console.log(`[BotBoss][${extensionName}Detect]`, ...args); };
 
-            if (!copilotExtension.isActive) {
-                log('Copilot extension installed but not active. Attempting activation...');
+            if (!primaryExtension?.isActive) {
+                log(`${extensionName} extension installed but not active. Attempting activation...`);
                 try {
-                    await copilotExtension.activate();
-                    log('Activation attempted, isActive=', copilotExtension.isActive);
+                    await primaryExtension?.activate();
+                    log('Activation attempted, isActive=', primaryExtension?.isActive);
                 } catch (actErr) {
                     log('Activation error:', actErr);
                 }
             }
 
-            if (!copilotExtension.isActive) {
+            if (!primaryExtension?.isActive) {
                 copilotInfo.status = 'Disabled';
-                copilotInfo.detailHint = 'Extension installed but inactive (maybe disabled per workspace)';
+                copilotInfo.detailHint = `${extensionName} extension installed but inactive (maybe disabled per workspace)`;
                 return copilotInfo;
             }
 
             copilotInfo.isActive = true;
 
-            // Try to get status from the extension's exports/API
-            try {
-                const copilotApi = copilotExtension.exports;
-                log('Exports keys:', copilotApi ? Object.keys(copilotApi).slice(0, 25) : 'none');
-                
-                if (copilotApi) {
-                    let rawStatus: any | undefined;
-                    try {
-                        if (typeof copilotApi.getStatus === 'function') {
-                            rawStatus = await copilotApi.getStatus();
-                            log('getStatus() returned:', rawStatus);
-                        } else if (typeof copilotApi.status !== 'undefined') {
-                            rawStatus = copilotApi.status;
-                            log('Using exports.status:', rawStatus);
-                        } else if (copilotApi.state) {
-                            rawStatus = copilotApi.state;
-                            log('Using exports.state:', rawStatus);
+            // Try to get status from both extensions' exports/API
+            let statusFound = false;
+            
+            // First try Chat extension if available
+            if (copilotChatExtension?.isActive) {
+                try {
+                    const chatApi = copilotChatExtension.exports;
+                    log('Chat exports keys:', chatApi ? Object.keys(chatApi).slice(0, 25) : 'none');
+                    
+                    if (chatApi) {
+                        let rawStatus: any | undefined;
+                        
+                        // Try various status methods from chat API
+                        if (typeof chatApi.getStatus === 'function') {
+                            rawStatus = await chatApi.getStatus();
+                            log('Chat getStatus() returned:', rawStatus);
+                        } else if (typeof chatApi.status !== 'undefined') {
+                            rawStatus = chatApi.status;
+                            log('Using chat exports.status:', rawStatus);
+                        } else if (chatApi.state) {
+                            rawStatus = chatApi.state;
+                            log('Using chat exports.state:', rawStatus);
+                        } else if (chatApi.session || chatApi.chatSession) {
+                            rawStatus = chatApi.session || chatApi.chatSession;
+                            log('Using chat session status:', rawStatus);
                         }
-                    } catch (inner) {
-                        log('Inner status retrieval error:', inner);
-                    }
-                    copilotInfo.status = this.mapCopilotStatus(rawStatus);
-                    log('Mapped status after primary extraction:', copilotInfo.status);
 
-                    // Heuristic: if API exposes an isGenerating flag
-                    if (copilotApi.isGenerating || copilotApi.generating) {
-                        if (copilotApi.isGenerating === true || copilotApi.generating === true) {
+                        if (rawStatus) {
+                            copilotInfo.status = this.mapCopilotStatus(rawStatus);
+                            statusFound = true;
+                            log('Mapped status from chat extension:', copilotInfo.status);
+                        }
+
+                        // Check for chat-specific activity indicators
+                        const isChatActive = chatApi.isResponding === true || 
+                                           chatApi.responding === true ||
+                                           chatApi.isGenerating === true ||
+                                           chatApi.generating === true ||
+                                           chatApi.isBusy === true ||
+                                           chatApi.busy === true;
+
+                        if (isChatActive) {
+                            copilotInfo.status = 'Generating';
+                            copilotInfo.detailHint = 'Copilot Chat is responding to a query';
+                            statusFound = true;
+                            log('Chat is actively responding');
+                        }
+
+                        // Check for pending chat requests
+                        if (chatApi.pendingRequests?.length > 0 || chatApi.activeRequests?.length > 0) {
+                            const count = chatApi.pendingRequests?.length || chatApi.activeRequests?.length || 0;
+                            copilotInfo.status = 'Generating';
+                            copilotInfo.detailHint = `Processing ${count} chat request(s)`;
+                            statusFound = true;
+                            log(`Found ${count} pending chat requests`);
+                        }
+
+                        if (chatApi.lastActivity) {
+                            copilotInfo.lastActivity = chatApi.lastActivity;
+                        }
+                    }
+                } catch (chatApiError) {
+                    log('Could not access Copilot Chat API:', chatApiError);
+                }
+            }
+
+            // Fallback to main Copilot extension if chat didn't provide status
+            if (!statusFound && copilotExtension?.isActive) {
+                try {
+                    const copilotApi = copilotExtension.exports;
+                    log('Main Copilot exports keys:', copilotApi ? Object.keys(copilotApi).slice(0, 25) : 'none');
+                    
+                    if (copilotApi) {
+                        let rawStatus: any | undefined;
+                        try {
+                            if (typeof copilotApi.getStatus === 'function') {
+                                rawStatus = await copilotApi.getStatus();
+                                log('Main getStatus() returned:', rawStatus);
+                            } else if (typeof copilotApi.status !== 'undefined') {
+                                rawStatus = copilotApi.status;
+                                log('Using main exports.status:', rawStatus);
+                            } else if (copilotApi.state) {
+                                rawStatus = copilotApi.state;
+                                log('Using main exports.state:', rawStatus);
+                            }
+                        } catch (inner) {
+                            log('Inner status retrieval error:', inner);
+                        }
+                        
+                        if (!statusFound) {
+                            copilotInfo.status = this.mapCopilotStatus(rawStatus);
+                            log('Mapped status after primary extraction:', copilotInfo.status);
+                        }
+
+                        // Enhanced generation detection - check multiple indicators
+                        const isGenerating = copilotApi.isGenerating === true || 
+                                           copilotApi.generating === true ||
+                                           copilotApi.isBusy === true ||
+                                           copilotApi.busy === true ||
+                                           copilotApi.working === true ||
+                                           copilotApi.isWorking === true;
+
+                        if (isGenerating) {
                             copilotInfo.status = 'Generating';
                             copilotInfo.detailHint = 'Copilot is currently producing output';
-                            log('Overriding status to Generating due to isGenerating flag');
+                            log('Overriding status to Generating due to activity flags');
                         }
-                    }
 
-                    if (copilotApi.lastActivity) {
-                        copilotInfo.lastActivity = copilotApi.lastActivity;
+                        // Check for completion requests or pending operations
+                        if (copilotApi.completionState || copilotApi.pendingRequests || copilotApi.activeRequests) {
+                            const completionState = copilotApi.completionState;
+                            const pendingCount = copilotApi.pendingRequests?.length || copilotApi.activeRequests?.length || 0;
+                            
+                            if (pendingCount > 0) {
+                                copilotInfo.status = 'Generating';
+                                copilotInfo.detailHint = `Processing ${pendingCount} request(s)`;
+                                log(`Found ${pendingCount} pending/active requests`);
+                            } else if (completionState && typeof completionState === 'object') {
+                                const state = JSON.stringify(completionState).toLowerCase();
+                                if (state.includes('generating') || state.includes('pending') || state.includes('processing')) {
+                                    copilotInfo.status = 'Generating';
+                                    copilotInfo.detailHint = 'Completion in progress';
+                                    log('Detected active completion state');
+                                }
+                            }
+                        }
+
+                        // Check session or authentication status more granularly
+                        if (copilotApi.session || copilotApi.auth || copilotApi.authentication) {
+                            const authInfo = copilotApi.session || copilotApi.auth || copilotApi.authentication;
+                            if (authInfo && typeof authInfo === 'object') {
+                                if (authInfo.status === 'SignedOut' || authInfo.signedIn === false) {
+                                    copilotInfo.status = 'SigninRequired';
+                                    copilotInfo.detailHint = 'Sign in to GitHub to use Copilot';
+                                } else if (authInfo.status === 'SignedIn' || authInfo.signedIn === true) {
+                                    // Good auth state, keep existing status unless it was unknown
+                                    if (copilotInfo.status === 'Unknown') {
+                                        copilotInfo.status = 'Idle';
+                                    }
+                                }
+                            }
+                        }
+
+                        if (copilotApi.lastActivity) {
+                            copilotInfo.lastActivity = copilotApi.lastActivity;
+                        }
+                    } else {
+                        copilotInfo.status = 'Idle';
+                        log('No main exports API, defaulting to Idle');
                     }
-                } else {
-                    copilotInfo.status = 'Idle';
-                    log('No exports API, defaulting to Idle');
+                } catch (apiError) {
+                    log('Could not access main Copilot API:', apiError);
+                    // Extension is active but API call failed - treat as Idle unless error message suggests otherwise
+                    if (!statusFound) {
+                        copilotInfo.status = 'Idle';
+                    }
                 }
-            } catch (apiError) {
-                log('Could not access Copilot API:', apiError);
-                // Extension is active but API call failed - treat as Idle unless error message suggests otherwise
-                copilotInfo.status = 'Idle';
             }
 
             // Fallback: if still Unknown but extension is active, treat as Idle so user sees usable state
@@ -1177,15 +1298,16 @@ export class VSCodeInstanceService {
             const s = raw.toLowerCase();
             if (/(sign.?in|required login|sign in)/.test(s)) return 'SigninRequired';
             if (/unauthori|forbidden|401|403/.test(s)) return 'Unauthorized';
-            if (/rate.?limit|429/.test(s)) return 'RateLimited';
+            if (/(rate.?limit|429|quota.?exceeded)/.test(s)) return 'RateLimited';
             if (/(approval|policy|waiting|pending review)/.test(s)) return 'Waiting for Approval';
-            if (/(initializing|starting|loading|activating)/.test(s)) return 'Initializing';
-            if (/(generating|computing|producing|inference|working)/.test(s)) return 'Generating';
-            if (/(failed|failure)/.test(s)) return 'Failed';
-            if (/(error|exception)/.test(s)) return 'Error';
-            if (/(completed|done|success)/.test(s)) return 'Done';
-            if (/(disabled|inactive|turned off)/.test(s)) return 'Disabled';
-            if (/(idle|ready|running|active)/.test(s)) return 'Idle';
+            if (/(initializing|starting|loading|activating|connecting)/.test(s)) return 'Initializing';
+            // Enhanced chat detection patterns
+            if (/(generating|computing|producing|inference|working|responding|typing|thinking|processing.?query|answering)/.test(s)) return 'Generating';
+            if (/(failed|failure|error|exception)/.test(s)) return 'Failed';
+            if (/(completed|done|success|finished|response.?complete)/.test(s)) return 'Done';
+            if (/(disabled|inactive|turned off|unavailable)/.test(s)) return 'Disabled';
+            // Chat-specific idle states
+            if (/(idle|ready|running|active|available|waiting.?for.?input|standby)/.test(s)) return 'Idle';
             return 'Unknown';
         };
 

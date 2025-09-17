@@ -1,1 +1,60 @@
-{"version": "0.2.0","configurations": [{"name": "Run Extension","type": "extensionHost","request": "launch","args": ["--extensionDevelopmentPath=${workspaceFolder}"],"outFiles": ["${workspaceFolder}/out/**/*.js"],"preLaunchTask": "${workspaceFolder}/npm: compile"}]}
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Extension",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}"
+            ],
+            "outFiles": [
+                "${workspaceFolder}/out/**/*.js"
+            ],
+            "preLaunchTask": "${workspaceFolder}/npm: compile",
+            "sourceMaps": true,
+            "smartStep": true,
+            "trace": true
+        },
+        {
+            "name": "Run Extension (Watch Mode)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}"
+            ],
+            "outFiles": [
+                "${workspaceFolder}/out/**/*.js"
+            ],
+            "preLaunchTask": "${workspaceFolder}/npm: watch",
+            "sourceMaps": true,
+            "smartStep": true,
+            "trace": true
+        },
+        {
+            "name": "Extension Tests",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                "--extensionTestsPath=${workspaceFolder}/out/test/suite/index"
+            ],
+            "outFiles": [
+                "${workspaceFolder}/out/test/**/*.js"
+            ],
+            "preLaunchTask": "${workspaceFolder}/npm: compile",
+            "sourceMaps": true,
+            "smartStep": true
+        },
+        {
+            "name": "Attach to Extension Host",
+            "type": "node",
+            "request": "attach",
+            "port": 5870,
+            "sourceMaps": true,
+            "outFiles": [
+                "${workspaceFolder}/out/**/*.js"
+            ]
+        }
+    ]
+}
