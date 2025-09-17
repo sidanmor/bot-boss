@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { VSCodeInstanceService, VSCodeInstance } from "./vscodeInstanceService";
 import { SharedInstanceManager } from "./sharedInstanceManager";
 import { GitHubStatusService } from "./githubStatusService";
+import { BotBossEditorPanel } from "./editorPanel";
 
 // Tree data provider for VS Code instances
 class VSCodeInstanceProvider implements vscode.TreeDataProvider<VSCodeInstanceTreeItem> {
@@ -790,10 +791,16 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage('GitHub status cache cleared. Next status request will fetch fresh data.');
     });
 
+    // Command: Open in Editor - opens the extension interface as a tab
+    const openInEditorCommand = vscode.commands.registerCommand('bot-boss.openInEditor', () => {
+        BotBossEditorPanel.createOrShow(context.extensionUri);
+    });
+
     context.subscriptions.push(copilotStatusCommand);
     context.subscriptions.push(gitHubStatusCommand);
     context.subscriptions.push(quickGitHubStatusCommand);
     context.subscriptions.push(clearGitHubCacheCommand);
+    context.subscriptions.push(openInEditorCommand);
     context.subscriptions.push({
         dispose: () => clearInterval(autoRefreshInterval)
     });

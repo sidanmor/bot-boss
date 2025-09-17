@@ -43,6 +43,11 @@
                 "command": "bot-boss.showSharedFileStatus",
                 "title": "Show Shared File Status",
                 "icon": "$(pulse)"
+            },
+            {
+                "command": "bot-boss.openInEditor",
+                "title": "Open in Editor",
+                "icon": "$(open-preview)"
             }
         ],
         "viewsContainers": {
@@ -50,7 +55,7 @@
                 {
                     "id": "bot-boss-view",
                     "title": "Bot Boss",
-                    "icon": "$(workspace-trusted)"
+                    "icon": "$(notebook-render-output)"
                 }
             ]
         },
@@ -82,6 +87,11 @@
                 },
                 {
                     "command": "bot-boss.showSharedFileStatus",
+                    "when": "view == vscodeInstancesExplorer",
+                    "group": "navigation"
+                },
+                {
+                    "command": "bot-boss.openInEditor",
                     "when": "view == vscodeInstancesExplorer",
                     "group": "navigation"
                 }
